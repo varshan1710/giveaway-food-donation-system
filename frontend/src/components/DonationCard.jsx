@@ -22,7 +22,7 @@ const DonationCard = ({ donation, actions }) => {
       <div className="h-40 w-full shrink-0 overflow-hidden rounded-lg bg-gray-100 dark:bg-gray-700 sm:h-28 sm:w-28">
         {donation.image ? (
           <img
-            src={`${import.meta.env.VITE_API_URL?.replace('/api', '') || 'http://localhost:5000'}${donation.image}`}
+            src={`${(import.meta.env.VITE_API_URL || '').replace('/api', '')}${donation.image}`}
             alt={donation.foodName}
             className="h-full w-full object-cover"
           />

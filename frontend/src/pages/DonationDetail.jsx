@@ -36,7 +36,7 @@ const DonationDetail = () => {
   if (loading) return <DashboardLayout><Loader /></DashboardLayout>;
   if (!donation) return <DashboardLayout><p>Donation not found.</p></DashboardLayout>;
 
-  const imageBase = import.meta.env.VITE_API_URL?.replace('/api', '') || 'http://localhost:5000';
+  const imageBase = (import.meta.env.VITE_API_URL || '').replace('/api', '');
 
   return (
     <DashboardLayout>
