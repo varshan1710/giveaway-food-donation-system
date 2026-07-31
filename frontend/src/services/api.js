@@ -7,10 +7,16 @@ import axios from 'axios';
 const API_URL = import.meta.env.VITE_API_URL;
 
 if (!API_URL) {
-  console.error('[api.js] VITE_API_URL is not set. Create frontend/.env and add: VITE_API_URL=https://your-backend.onrender.com/api');
+  console.error('[api.js] VITE_API_URL is not set. Create frontend/.env and add: VITE_API_URL=https://your-backend.onrender.com');
 }
 
-const api = axios.create({ baseURL: API_URL });
+// Append /api suffix if not already present
+let baseURL = API_URL;
+if (baseURL && !baseURL.endsWith('/api') && !baseURL.endsWith('/api/')) {
+  baseURL = baseURL.replace(/\/+$/, '') + '/api';
+}
+
+const api = axios.create({ baseURL });
 
 api.interceptors.request.use((config) => {
   const token = sessionStorage.getItem('giveaway_token');
