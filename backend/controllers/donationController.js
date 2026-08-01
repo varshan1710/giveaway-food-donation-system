@@ -485,7 +485,12 @@ const updateDeliveryStatus = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error('Donation not found');
   }
-  if (!donation.assignedVolunteer || donation.assignedVolunteer.toString() !== req.user._id.toString()) {
+  const isAssignedVolunteer = donation.assignedVolunteer &&
+    donation.assignedVolunteer.toString() === req.user._id.toString();
+  const isSelfPickupNGO = donation.isSelfPickup && donation.acceptedBy &&
+    donation.acceptedBy.toString() === req.user._id.toString();
+
+  if (!isAssignedVolunteer && !isSelfPickupNGO) {
     res.status(403);
     throw new Error('You are not assigned to this donation');
   }
@@ -630,7 +635,10 @@ const ngoSelfPickupDecision = asyncHandler(async (req, res) => {
 
   if (accepted === true) {
     donation.status = 'out_for_pickup';
-    donation.assignedVolunteer = donation.acceptedBy; // NGO collects themselves
+    donation.isSelfPickup = true;
+    // Do NOT set assignedVolunteer — the NGO is handling pickup themselves,
+    // and assignedVolunteer must stay reserved for actual volunteer users
+    // (per updateDeliveryStatus's authorize('volunteer') restriction below).
     donation.timeline.push({
       status: 'out_for_pickup',
       note: 'NGO decided to self-collect the food donation',

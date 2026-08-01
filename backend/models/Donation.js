@@ -52,6 +52,7 @@ const donationSchema = new mongoose.Schema(
     },
     acceptedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }, // NGO user
     assignedVolunteer: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    isSelfPickup: { type: Boolean, default: false },
     notifiedVolunteers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     volunteerNotifiedAt: { type: Date, default: null },
     // Priority score computed server-side: sooner expiry + larger quantity = higher priority

@@ -38,7 +38,7 @@ router.get('/:id/nearby-ngos', protect, authorize('donor', 'admin'), getNearbyNG
 router.put('/:id/accept', protect, authorize('ngo'), acceptDonation);
 router.put('/:id/reject', protect, authorize('ngo'), rejectDonation);
 router.put('/:id/assign-volunteer', protect, authorize('ngo'), assignVolunteer);
-router.put('/:id/status', protect, authorize('volunteer'), updateDeliveryStatus);
+router.put('/:id/status', protect, authorize('volunteer', 'ngo'), updateDeliveryStatus);
 router.put('/:id/self-pickup', protect, authorize('ngo'), ngoSelfPickupDecision);
 
 module.exports = router;
