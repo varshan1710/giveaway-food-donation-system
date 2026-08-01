@@ -7,8 +7,10 @@ const {
   recommendNearestNGOs,
   sortByPriority,
   detectDuplicateOrSuspicious,
+  getEligibleNGOs,
+  getEligibleVolunteers,
 } = require('../utils/smartFeatures');
-const { notifyNGOsOfNewDonation } = require('../utils/notify');
+const { notifyNGOsOfNewDonation, notifyVolunteersOfNewPickup } = require('../utils/notify');
 
 // @desc    Create a donation (Donor only)
 // @route   POST /api/donations
@@ -77,7 +79,7 @@ async function alertNearbyNGOs(donation) {
   const { haversineDistanceKm } = require('../utils/smartFeatures');
 
   // Load all active NGOs with their user info
-  const allNGOs = await NGO.find().populate(
+  const allNGOs = await NGO.find({ isApproved: true }).populate(
     'user',
     'name email phone location isActive'
   );
@@ -86,46 +88,34 @@ async function alertNearbyNGOs(donation) {
   const hoursToExpiry = Math.max(0, (new Date(donation.expiryDate) - Date.now()) / (1000 * 60 * 60));
 
   // Determine urgency multiplier
-  let radiusMultiplier = 1;
   let urgencyLabel = '';
   if (hoursToExpiry < 2) {
-    radiusMultiplier = 2.5;
     urgencyLabel = '🚨 URGENT — expires in < 2 hrs!';
   } else if (hoursToExpiry < 6) {
-    radiusMultiplier = 1.5;
     urgencyLabel = '⚠️ High priority — expires in < 6 hrs';
   }
 
-  // Build NGO list using officeLocation for distance (with user.location fallback)
-  const allMappedNGOs = allNGOs
-    .filter((n) => n.user && n.user.isActive)
-    .map((n) => {
-      const hasOffice =
-        n.officeLocation &&
-        n.officeLocation.coordinates &&
-        (n.officeLocation.coordinates[0] !== 0 || n.officeLocation.coordinates[1] !== 0);
-      const coords = hasOffice ? n.officeLocation.coordinates : (n.user?.location?.coordinates || null);
-      if (!coords || (coords[0] === 0 && coords[1] === 0)) return null; // skip NGOs with no coordinates
+  // Filter out any invalid / missing coordinates
+  const activeMappedNGOs = allNGOs.filter(n =>
+    n.user &&
+    n.user.isActive &&
+    n.officeLocation &&
+    n.officeLocation.coordinates &&
+    n.officeLocation.coordinates.length === 2 &&
+    (n.officeLocation.coordinates[0] !== 0 || n.officeLocation.coordinates[1] !== 0)
+  );
 
-      const distanceKm = Number(haversineDistanceKm(donationCoords, coords).toFixed(2));
-      const effectiveRadius = (n.serviceRadiusKm || 10) * radiusMultiplier;
+  // Call getEligibleNGOs() instead of the current flat-radius filter
+  const eligible = getEligibleNGOs(donationCoords, donation.expiryDate, activeMappedNGOs);
 
-      return {
-        ngo: n,
-        distanceKm,
-        effectiveRadius,
-        withinRadius: distanceKm <= effectiveRadius,
-      };
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.distanceKm - b.distanceKm);
-
-  const withinRadiusNGOs = allMappedNGOs.filter((item) => item.withinRadius);
-  const ngoList = (withinRadiusNGOs.length > 0 ? withinRadiusNGOs : allMappedNGOs).slice(0, 10);
-
-  if (!ngoList.length) {
-    console.log('[alertNearbyNGOs] No active NGOs found for donation', donation._id);
-    return { notifiedCount: 0, smsSent: false, recipients: [] };
+  if (!eligible.length) {
+    donation.status = 'no_ngo_reachable';
+    await donation.save();
+    return {
+      notifiedCount: 0,
+      noNgoReachable: true,
+      message: "No NGO can reach this in time. Try extending the safe duration."
+    };
   }
 
   const appUrl = process.env.CLIENT_URL || 'http://localhost:5173';
@@ -135,12 +125,15 @@ async function alertNearbyNGOs(donation) {
       ? `${Math.round(hoursToExpiry * 60)} minutes`
       : `${hoursToExpiry.toFixed(1)} hours`;
 
-  const recipients = ngoList.map(({ ngo, distanceKm }) => ({
-    name: ngo.organizationName,
-    email: ngo.user.email,
-    phone: ngo.user.phone,
-    distanceKm,
-  }));
+  const recipients = eligible.map(({ ngo }) => {
+    const distanceKm = Number(haversineDistanceKm(donationCoords, ngo.officeLocation.coordinates).toFixed(2));
+    return {
+      name: ngo.organizationName,
+      email: ngo.user.email,
+      phone: ngo.user.phone,
+      distanceKm,
+    };
+  });
 
   const notificationResults = await notifyNGOsOfNewDonation(recipients, {
     foodName: donation.foodName,
@@ -401,11 +394,10 @@ const rejectDonation = asyncHandler(async (req, res) => {
   res.json({ success: true, data: donation });
 });
 
-// @desc    NGO assigns a volunteer to an accepted donation
+// @desc    NGO assigns/alerts volunteers to an accepted donation
 // @route   PUT /api/donations/:id/assign-volunteer
 // @access  Private (ngo)
 const assignVolunteer = asyncHandler(async (req, res) => {
-  const { volunteerId } = req.body;
   const donation = await Donation.findById(req.params.id);
   if (!donation) {
     res.status(404);
@@ -430,15 +422,48 @@ const assignVolunteer = asyncHandler(async (req, res) => {
     throw new Error('Only the accepting NGO can assign a volunteer');
   }
 
-  const volunteer = await User.findOne({ _id: volunteerId, role: 'volunteer' });
-  if (!volunteer) {
+  const ngo = await NGO.findOne({ user: req.user._id });
+  if (!ngo) {
     res.status(404);
-    throw new Error('Volunteer not found');
+    throw new Error('NGO profile not found');
   }
 
-  donation.assignedVolunteer = volunteerId;
+  const Volunteer = require('../models/Volunteer');
+  const trackingVolunteers = await Volunteer.find({ trackingEnabled: true, isApproved: true }).populate('user');
+  const activeUserIds = trackingVolunteers.map(v => v.user?._id).filter(Boolean);
+  const allVolunteers = await User.find({ _id: { $in: activeUserIds }, isActive: true });
+
+  const donorCoords = donation.pickupLocation.coordinates;
+  const ngoCoords = ngo.officeLocation.coordinates || req.user.location.coordinates;
+
+  const eligibleVolunteers = getEligibleVolunteers(donorCoords, ngoCoords, allVolunteers, 50);
+
+  // Notify them using notifyVolunteersOfNewPickup
+  const recipients = eligibleVolunteers.map(v => ({
+    name: v.name,
+    email: v.email,
+    phone: v.phone
+  }));
+
+  if (recipients.length > 0) {
+    await notifyVolunteersOfNewPickup(recipients, {
+      foodName: donation.foodName,
+      quantity: donation.quantity,
+      expiryDate: donation.expiryDate,
+      pickupLocation: donation.pickupLocation,
+      donationId: donation._id.toString()
+    }).catch(err => console.error('[assignVolunteer] Failed to notify volunteers:', err));
+  }
+
+  donation.notifiedVolunteers = eligibleVolunteers.map(v => v._id);
+  donation.volunteerNotifiedAt = new Date();
+  donation.assignedVolunteer = null;
   donation.status = 'out_for_pickup';
-  donation.timeline.push({ status: 'out_for_pickup', note: 'Volunteer assigned for pickup and delivery', updatedBy: req.user._id });
+  donation.timeline.push({
+    status: 'out_for_pickup',
+    note: `Alerted ${eligibleVolunteers.length} eligible volunteer(s) within 50km for pickup`,
+    updatedBy: req.user._id
+  });
   await donation.save();
 
   res.json({ success: true, data: donation });
@@ -582,6 +607,50 @@ const trackVolunteerByPhone = asyncHandler(async (req, res) => {
   });
 });
 
+// @desc    NGO decides on self-pickup when no volunteer was found
+// @route   PUT /api/donations/:id/self-pickup
+// @access  Private (ngo)
+const ngoSelfPickupDecision = asyncHandler(async (req, res) => {
+  const { accepted } = req.body;
+  const donation = await Donation.findById(req.params.id);
+  if (!donation) {
+    res.status(404);
+    throw new Error('Donation not found');
+  }
+
+  if (donation.status !== 'awaiting_ngo_selfpickup') {
+    res.status(400);
+    throw new Error('This donation is not awaiting a self-pickup decision');
+  }
+
+  if (donation.acceptedBy.toString() !== req.user._id.toString()) {
+    res.status(403);
+    throw new Error('Only the accepting NGO can make this decision');
+  }
+
+  if (accepted === true) {
+    donation.status = 'out_for_pickup';
+    donation.assignedVolunteer = donation.acceptedBy; // NGO collects themselves
+    donation.timeline.push({
+      status: 'out_for_pickup',
+      note: 'NGO decided to self-collect the food donation',
+      updatedBy: req.user._id,
+      timestamp: new Date()
+    });
+  } else {
+    donation.status = 'cancelled';
+    donation.timeline.push({
+      status: 'cancelled',
+      note: 'NGO declined self-collection; donation cancelled',
+      updatedBy: req.user._id,
+      timestamp: new Date()
+    });
+  }
+
+  await donation.save();
+  res.json({ success: true, data: donation });
+});
+
 module.exports = {
   createDonation,
   getDonations,
@@ -595,4 +664,6 @@ module.exports = {
   updateDeliveryStatus,
   trackDonation,
   trackVolunteerByPhone,
+  ngoSelfPickupDecision,
 };
+

@@ -49,7 +49,11 @@ const NewDonation = () => {
       const { data } = await createDonation(fd);
       const notif = data?.notificationStatus;
 
-      if (notif && (notif.smsSent || notif.notifiedCount > 0)) {
+      const isNoNgoReachable = data?.noNgoReachable || notif?.noNgoReachable;
+      if (isNoNgoReachable) {
+        const msg = data?.message || notif?.message || 'No NGO can reach this in time. Try extending the safe duration.';
+        toast.error(msg, { duration: 8000 });
+      } else if (notif && (notif.smsSent || notif.notifiedCount > 0)) {
         const recipientPhones = (notif.recipients || [])
           .map((r) => `${r.name}${r.phone ? ` (${r.phone})` : ''}`)
           .join(', ');

@@ -142,8 +142,13 @@ const getNearbyOpenDonations = asyncHandler(async (req, res) => {
 
   const radiusKm = Number(req.query.radius) || 5; // default 5 km
 
-  // Find pending donations (not yet accepted by anyone) within radius
-  const allPending = await Donation.find({ status: 'pending' })
+  // Find pending donations (not yet accepted by anyone) or out_for_pickup awaiting volunteer within radius
+  const allPending = await Donation.find({
+    $or: [
+      { status: 'pending' },
+      { status: 'out_for_pickup', assignedVolunteer: null, notifiedVolunteers: req.user._id }
+    ]
+  })
     .populate('donor', 'name phone address avatar')
     .sort({ priorityScore: -1, expiryDate: 1 });
 
@@ -167,9 +172,15 @@ const getNearbyOpenDonations = asyncHandler(async (req, res) => {
 // @route   PUT /api/volunteer/donations/:id/accept
 // @access  Private (volunteer)
 const volunteerAcceptDonation = asyncHandler(async (req, res) => {
-  // Atomic: only matches if status is still 'pending'
+  // Atomic: matches if status is pending, or out_for_pickup with no volunteer
   const donation = await Donation.findOneAndUpdate(
-    { _id: req.params.id, status: 'pending' },
+    {
+      _id: req.params.id,
+      $or: [
+        { status: 'pending' },
+        { status: 'out_for_pickup', assignedVolunteer: null }
+      ]
+    },
     {
       $set: {
         status: 'out_for_pickup',

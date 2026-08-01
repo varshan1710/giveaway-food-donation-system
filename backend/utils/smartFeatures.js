@@ -133,10 +133,40 @@ function detectDuplicateOrSuspicious(newDonation, recentDonorDonations) {
   return result;
 }
 
+function calculateETAHours(coordsA, coordsB) {
+  // speed is a MINIMUM floor of 70 km/h (real speed can only be >= 70,
+  // so this gives a worst-case/safe-upper-bound ETA — never underestimates)
+  const MIN_SPEED_KMH = 70;
+  return haversineDistanceKm(coordsA, coordsB) / MIN_SPEED_KMH;
+}
+
+function getEligibleNGOs(donationCoords, expiryDate, ngoList) {
+  // ngoList = array of NGO docs with officeLocation.coordinates
+  // returns only NGOs whose ETA <= remaining safe time, sorted by ETA ascending
+  const remainingSafeHours = (new Date(expiryDate) - Date.now()) / (1000 * 60 * 60);
+  return ngoList
+    .map(ngo => ({ ngo, etaHours: calculateETAHours(donationCoords, ngo.officeLocation.coordinates) }))
+    .filter(({ etaHours }) => etaHours <= remainingSafeHours)
+    .sort((a, b) => a.etaHours - b.etaHours);
+}
+
+function getEligibleVolunteers(donorCoords, ngoCoords, volunteerList, maxKm = 50) {
+  // returns volunteers within maxKm of BOTH donor and ngo location
+  return volunteerList.filter(v => {
+    const toDonor = haversineDistanceKm(donorCoords, v.location.coordinates);
+    const toNGO = haversineDistanceKm(ngoCoords, v.location.coordinates);
+    return toDonor <= maxKm && toNGO <= maxKm;
+  });
+}
+
 module.exports = {
   haversineDistanceKm,
   recommendNearestNGOs,
   sortByPriority,
   predictDemand,
   detectDuplicateOrSuspicious,
+  calculateETAHours,
+  getEligibleNGOs,
+  getEligibleVolunteers,
 };
+

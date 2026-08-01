@@ -47,11 +47,13 @@ const donationSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['pending', 'accepted', 'rejected', 'out_for_pickup', 'picked_up', 'delivered', 'expired', 'cancelled'],
+      enum: ['pending', 'accepted', 'rejected', 'out_for_pickup', 'picked_up', 'delivered', 'expired', 'cancelled', 'no_ngo_reachable', 'awaiting_ngo_selfpickup'],
       default: 'pending',
     },
     acceptedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }, // NGO user
     assignedVolunteer: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    notifiedVolunteers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    volunteerNotifiedAt: { type: Date, default: null },
     // Priority score computed server-side: sooner expiry + larger quantity = higher priority
     priorityScore: { type: Number, default: 0 },
     // Flags set by the duplicate/suspicious-donation detector

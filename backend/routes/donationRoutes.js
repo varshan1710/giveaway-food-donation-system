@@ -14,6 +14,7 @@ const {
   updateDeliveryStatus,
   trackDonation,
   trackVolunteerByPhone,
+  ngoSelfPickupDecision,
 } = require('../controllers/donationController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { validate, donationValidation } = require('../middleware/validateMiddleware');
@@ -38,5 +39,6 @@ router.put('/:id/accept', protect, authorize('ngo'), acceptDonation);
 router.put('/:id/reject', protect, authorize('ngo'), rejectDonation);
 router.put('/:id/assign-volunteer', protect, authorize('ngo'), assignVolunteer);
 router.put('/:id/status', protect, authorize('volunteer'), updateDeliveryStatus);
+router.put('/:id/self-pickup', protect, authorize('ngo'), ngoSelfPickupDecision);
 
 module.exports = router;

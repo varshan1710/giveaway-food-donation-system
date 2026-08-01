@@ -232,4 +232,57 @@ async function notifyNGOsOfNewDonation(recipients, donation) {
   return results.map((r) => (r.status === 'fulfilled' ? r.value : { error: r.reason?.message }));
 }
 
-module.exports = { sendEmail, sendSMS, notifyNGOsOfNewDonation };
+async function notifyVolunteersOfNewPickup(recipients, donation) {
+  const appUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+  const donationUrl = `${appUrl}/dashboard/pickups?donationId=${donation.donationId}`;
+  const expiry = new Date(donation.expiryDate).toLocaleString();
+
+  const results = await Promise.allSettled(
+    recipients.map(async (r) => {
+      // Email
+      const subject = `🚲 New Pickup Available: ${donation.foodName}`;
+      const text =
+        `Hi ${r.name},\n\n` +
+        `A new food pickup is available near you:\n\n` +
+        `Food:     ${donation.foodName}\n` +
+        `Quantity: ${donation.quantity.value} ${donation.quantity.unit}\n` +
+        `Location: ${donation.pickupLocation.address}\n` +
+        `Expires:  ${expiry}\n\n` +
+        `⚡ First volunteer to accept gets it! Accept here:\n${donationUrl}\n\n` +
+        `— GiveAway`;
+
+      const html = `
+        <div style="font-family:sans-serif;max-width:520px">
+          <h2 style="color:#16a34a;">🚲 GiveAway — New Pickup Near You</h2>
+          <p>Hi <strong>${r.name}</strong>,</p>
+          <p>A new food pickup is available near your location:</p>
+          <table style="width:100%;border-collapse:collapse;margin:12px 0;">
+            <tr><td style="padding:6px 4px;color:#666;">Food</td><td><strong>${donation.foodName}</strong></td></tr>
+            <tr><td style="padding:6px 4px;color:#666;">Quantity</td><td>${donation.quantity.value} ${donation.quantity.unit}</td></tr>
+            <tr><td style="padding:6px 4px;color:#666;">Pickup at</td><td>${donation.pickupLocation.address}</td></tr>
+            <tr><td style="padding:6px 4px;color:#666;">Expiry</td><td style="color:#dc2626;font-weight:600;">${expiry}</td></tr>
+          </table>
+          <p style="font-size:13px;color:#555;">⚡ <strong>First volunteer to accept gets it.</strong> Tap below to accept now:</p>
+          <a href="${donationUrl}" style="display:inline-block;background:#16a34a;color:white;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:700;font-size:15px;">Accept Pickup</a>
+        </div>`;
+
+      // SMS
+      const smsMessage =
+        `🚲 GiveAway: ${donation.foodName} (${donation.quantity.value} ${donation.quantity.unit}) ready for pickup at ` +
+        `${donation.pickupLocation.address}. Expiry: ${expiry}. ` +
+        `Accept: ${donationUrl}`;
+
+      const [emailResult, smsResult] = await Promise.all([
+        r.email ? sendEmail({ to: r.email, subject, text, html }) : Promise.resolve({ sent: false, reason: 'No email on file' }),
+        r.phone ? sendSMS({ to: r.phone, message: smsMessage }) : Promise.resolve({ sent: false, reason: 'No phone on file' }),
+      ]);
+
+      return { recipient: r.name, email: emailResult, sms: smsResult };
+    })
+  );
+
+  return results.map((r) => (r.status === 'fulfilled' ? r.value : { error: r.reason?.message }));
+}
+
+module.exports = { sendEmail, sendSMS, notifyNGOsOfNewDonation, notifyVolunteersOfNewPickup };
+

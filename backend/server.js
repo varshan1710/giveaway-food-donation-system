@@ -18,6 +18,10 @@ const { notFound, errorHandler } = require('./middleware/errorMiddleware');
 // Connect to MongoDB Atlas
 connectDB();
 
+// Start the background donation volunteer timeout checker (runs every 60s)
+const { startTimeoutChecker } = require('./utils/timeoutChecker');
+startTimeoutChecker();
+
 const app = express();
 
 // --- Security & utility middleware ---
