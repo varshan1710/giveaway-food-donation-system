@@ -27,4 +27,14 @@ export const updateDeliveryStatus = (id, status, note) =>
 
 export const trackDonation = (id) => api.get(`/donations/${id}/track`);
 
+export const predictDonationETA = (id, vehicleType = 'bike') => api.post(`/donations/${id}/predict-eta`, { vehicleType });
+
 export const trackVolunteerByPhone = (phone) => api.get(`/donations/track-by-phone/${encodeURIComponent(phone)}`);
+
+export const submitFoodSafetyReview = (id, isSafe) => api.put(`/donations/${id}/food-review`, { isSafe });
+
+export const respondVolunteerInvitation = (id, accept) => api.put(`/donations/${id}/volunteer-response`, { accept });
+
+export const completeVolunteerDelivery = (id) => api.put(`/donations/${id}/volunteer-complete`);
+
+export const confirmNgoDelivery = (id) => api.put(`/donations/${id}/ngo-confirm-delivery`);

@@ -1,26 +1,48 @@
 // pages/ngo/NgoOverview.jsx
 import { useEffect, useState } from 'react';
+import toast from 'react-hot-toast';
 import { FiPackage, FiCheckCircle, FiUsers, FiTrendingUp } from 'react-icons/fi';
 import DashboardLayout from '../../components/DashboardLayout';
 import StatCard from '../../components/StatCard';
 import DonationCard from '../../components/DonationCard';
+import DeleteConfirmModal from '../../components/DeleteConfirmModal';
 import Loader from '../../components/Loader';
-import { getDonations } from '../../services/donationService';
+import { getDonations, deleteDonation } from '../../services/donationService';
 import { getMyNgoProfile } from '../../services/otherServices';
 
 const NgoOverview = () => {
   const [pending, setPending] = useState([]);
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [deleteTargetId, setDeleteTargetId] = useState(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
 
-  useEffect(() => {
+  const loadData = () => {
+    setLoading(true);
     Promise.all([getDonations({ status: 'pending', sortByExpiry: 'true' }), getMyNgoProfile()])
       .then(([donationsRes, profileRes]) => {
         setPending(donationsRes.data.data);
         setProfile(profileRes.data.data);
       })
       .finally(() => setLoading(false));
-  }, []);
+  };
+
+  useEffect(loadData, []);
+
+  const confirmDelete = async () => {
+    if (!deleteTargetId) return;
+    setDeleteLoading(true);
+    try {
+      await deleteDonation(deleteTargetId);
+      toast.success('Food donation record deleted');
+      setDeleteTargetId(null);
+      loadData();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Could not delete food donation record');
+    } finally {
+      setDeleteLoading(false);
+    }
+  };
 
   return (
     <DashboardLayout>
@@ -51,10 +73,32 @@ const NgoOverview = () => {
       ) : (
         <div className="space-y-3">
           {pending.slice(0, 5).map((d) => (
-            <DonationCard key={d._id} donation={d} />
+            <DonationCard
+              key={d._id}
+              donation={d}
+              actions={
+                <button
+                  onClick={() => setDeleteTargetId(d._id)}
+                  className="btn-danger !py-1.5 !px-3 text-xs flex items-center gap-1 ml-auto"
+                  title="Delete this food donation record"
+                >
+                  🗑️ Delete Record
+                </button>
+              }
+            />
           ))}
         </div>
       )}
+
+      {/* Confirmation Modal */}
+      <DeleteConfirmModal
+        isOpen={Boolean(deleteTargetId)}
+        title="Delete Food Donation Record?"
+        message="Are you sure you want to delete this food donation record? This action cannot be undone."
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteTargetId(null)}
+        loading={deleteLoading}
+      />
     </DashboardLayout>
   );
 };

@@ -11,6 +11,7 @@ const {
   getEligibleVolunteers,
 } = require('../utils/smartFeatures');
 const { notifyNGOsOfNewDonation, notifyVolunteersOfNewPickup } = require('../utils/notify');
+const { predictArrivalTime } = require('../utils/geminiAI');
 
 // @desc    Create a donation (Donor only)
 // @route   POST /api/donations
@@ -296,26 +297,18 @@ const updateDonation = asyncHandler(async (req, res) => {
 });
 
 // @desc    Delete donation (Donor: own pending donations only; Admin: any)
+// @desc    Delete donation (Donor, NGO, Admin can delete any donation record)
 // @route   DELETE /api/donations/:id
-// @access  Private (donor, admin)
+// @access  Private (donor, ngo, admin)
 const deleteDonation = asyncHandler(async (req, res) => {
   const donation = await Donation.findById(req.params.id);
   if (!donation) {
     res.status(404);
     throw new Error('Donation not found');
   }
-  const isOwner = donation.donor.toString() === req.user._id.toString();
-  if (!isOwner && req.user.role !== 'admin') {
-    res.status(403);
-    throw new Error('Not authorized to delete this donation');
-  }
-  if (isOwner && donation.status !== 'pending' && req.user.role !== 'admin') {
-    res.status(400);
-    throw new Error('Only pending donations can be deleted');
-  }
 
   await donation.deleteOne();
-  res.json({ success: true, message: 'Donation deleted' });
+  res.json({ success: true, message: 'Donation record deleted successfully' });
 });
 
 // @desc    Get nearest NGO recommendations for a donation
@@ -343,13 +336,47 @@ const getNearbyNGOs = asyncHandler(async (req, res) => {
   res.json({ success: true, data: recommendations });
 });
 
-// @desc    NGO accepts a donation — ATOMIC first-accept lock
+// @desc    NGO accepts a donation — ATOMIC first-accept lock with 50 km radius guard
 // @route   PUT /api/donations/:id/accept
 // @access  Private (ngo)
 const acceptDonation = asyncHandler(async (req, res) => {
-  // Use findOneAndUpdate with { status: 'pending' } condition so only ONE NGO
-  // can ever win the race — if two NGOs click Accept simultaneously, exactly
-  // one will match the filter and update; the other gets null back.
+  const { haversineDistanceKm } = require('../utils/smartFeatures');
+
+  // ── Pre-check: load donation to validate radius BEFORE the atomic update ──
+  const donationCheck = await Donation.findById(req.params.id);
+  if (!donationCheck) {
+    res.status(404);
+    throw new Error('Donation not found');
+  }
+  if (donationCheck.status !== 'pending') {
+    res.status(400);
+    throw new Error('This donation is no longer available — another NGO may have accepted it first.');
+  }
+
+  // ── 50 km radius check ────────────────────────────────────────────────────
+  // Compare NGO's registered office location against the donation pickup location.
+  const ngoProfile = await NGO.findOne({ user: req.user._id });
+  if (ngoProfile) {
+    const ngoCoords = ngoProfile.officeLocation?.coordinates;
+    const pickupCoords = donationCheck.pickupLocation?.coordinates;
+
+    // Only enforce if both coordinates are set (not [0,0])
+    const hasNgoCoords = ngoCoords && (ngoCoords[0] !== 0 || ngoCoords[1] !== 0);
+    const hasPickupCoords = pickupCoords && (pickupCoords[0] !== 0 || pickupCoords[1] !== 0);
+
+    if (hasNgoCoords && hasPickupCoords) {
+      const distKm = haversineDistanceKm(ngoCoords, pickupCoords);
+      if (distKm > 50) {
+        res.status(403);
+        throw new Error(
+          `This donation is ${distKm.toFixed(1)} km away from your NGO office. You can only accept donations within 50 km radius.`
+        );
+      }
+    }
+  }
+
+  // ── Atomic first-accept-wins update ──────────────────────────────────────
+  // Re-check status atomically to prevent race conditions after our pre-check.
   const donation = await Donation.findOneAndUpdate(
     { _id: req.params.id, status: 'pending' }, // atomic guard
     {
@@ -367,11 +394,8 @@ const acceptDonation = asyncHandler(async (req, res) => {
   );
 
   if (!donation) {
-    // Either doesn't exist or was already accepted by another NGO
     res.status(400);
-    throw new Error(
-      'This donation is no longer available — another NGO may have accepted it first.'
-    );
+    throw new Error('This donation is no longer available — another NGO may have accepted it first.');
   }
 
   await NGO.findOneAndUpdate({ user: req.user._id }, { $inc: { totalDonationsAccepted: 1 } });
@@ -398,6 +422,8 @@ const rejectDonation = asyncHandler(async (req, res) => {
 // @route   PUT /api/donations/:id/assign-volunteer
 // @access  Private (ngo)
 const assignVolunteer = asyncHandler(async (req, res) => {
+  const { volunteerId } = req.body;
+
   const donation = await Donation.findById(req.params.id);
   if (!donation) {
     res.status(404);
@@ -405,17 +431,14 @@ const assignVolunteer = asyncHandler(async (req, res) => {
   }
 
   // ── Flow enforcement ────────────────────────────────────────────────────
-  // A volunteer can only be assigned AFTER an NGO has accepted the donation.
-  // Sequence: Donation posted → Nearby NGOs alerted → NGO accepts → volunteer assigned.
   if (donation.status !== 'accepted') {
     res.status(400);
     throw new Error(
       donation.status === 'pending'
-        ? 'Cannot assign a volunteer yet — the donation is still pending NGO acceptance. Nearby NGOs have been alerted automatically.'
+        ? 'Cannot assign a volunteer yet — the donation is still pending NGO acceptance.'
         : `Cannot assign a volunteer to a donation with status "${donation.status}".`
     );
   }
-  // ─────────────────────────────────────────────────────────────────────────
 
   if (donation.acceptedBy.toString() !== req.user._id.toString()) {
     res.status(403);
@@ -423,22 +446,68 @@ const assignVolunteer = asyncHandler(async (req, res) => {
   }
 
   const ngo = await NGO.findOne({ user: req.user._id });
-  if (!ngo) {
-    res.status(404);
-    throw new Error('NGO profile not found');
+  const Volunteer = require('../models/Volunteer');
+
+  // ── If NGO selected a specific volunteer from dropdown ─────────────────
+  if (volunteerId) {
+    const targetVolunteerUser = await User.findById(volunteerId);
+    if (!targetVolunteerUser) {
+      res.status(404);
+      throw new Error('Selected volunteer not found');
+    }
+
+    donation.assignedVolunteer = targetVolunteerUser._id;
+    donation.status = 'assigned_pending_volunteer';
+    donation.volunteerInvitationStatus = 'pending';
+    donation.timeline.push({
+      status: 'assigned_pending_volunteer',
+      note: `NGO assigned volunteer ${targetVolunteerUser.name}. Awaiting volunteer acceptance.`,
+      updatedBy: req.user._id,
+      timestamp: new Date(),
+    });
+
+    await donation.save();
+
+    // Notify assigned volunteer via email + SMS to ACCEPT or DECLINE
+    const { sendEmail, sendSMS } = require('../utils/notify');
+    const appUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+    const donationUrl = `${appUrl}/dashboard/pickups`;
+
+    const subject = `🚲 Pickup Invitation from ${ngo?.organizationName || 'NGO'}: ${donation.foodName}`;
+    const textBody = `Hi ${targetVolunteerUser.name},\n\nNGO "${ngo?.organizationName || 'NGO'}" has invited you to pick up food donation "${donation.foodName}".\n\nPickup Address: ${donation.pickupLocation?.address}\n\nPlease log in to your dashboard to ACCEPT or DECLINE this request:\n${donationUrl}\n\n— GiveAway Platform`;
+    const htmlBody = `
+      <div style="font-family:sans-serif;max-width:500px">
+        <h2 style="color:#16a34a">🚲 Pickup Invitation!</h2>
+        <p>Hi <strong>${targetVolunteerUser.name}</strong>,</p>
+        <p>NGO <strong>${ngo?.organizationName || 'NGO'}</strong> has invited you to pick up food donation <strong>${donation.foodName}</strong>.</p>
+        <p><strong>Pickup Address:</strong> ${donation.pickupLocation?.address}</p>
+        <p>Please log in to your dashboard to <strong>ACCEPT</strong> or <strong>DECLINE</strong> this request.</p>
+        <a href="${donationUrl}" style="display:inline-block;background:#16a34a;color:white;padding:10px 18px;border-radius:8px;text-decoration:none">Open Dashboard</a>
+      </div>`;
+    const smsMsg = `GiveAway 🚲 NGO "${ngo?.organizationName || 'NGO'}" invited you to pick up "${donation.foodName}". Please check your dashboard to ACCEPT or DECLINE. ${donationUrl}`;
+
+    Promise.all([
+      targetVolunteerUser.email ? sendEmail({ to: targetVolunteerUser.email, subject, text: textBody, html: htmlBody }).catch(() => {}) : Promise.resolve(),
+      targetVolunteerUser.phone ? sendSMS({ to: targetVolunteerUser.phone, message: smsMsg }).catch(() => {}) : Promise.resolve(),
+    ]).catch(() => {});
+
+    return res.json({
+      success: true,
+      message: `Invitation sent to volunteer ${targetVolunteerUser.name}! Awaiting volunteer acceptance.`,
+      data: donation,
+    });
   }
 
-  const Volunteer = require('../models/Volunteer');
+  // ── Fallback: Broadcast to nearby tracking volunteers ───────────────────
   const trackingVolunteers = await Volunteer.find({ trackingEnabled: true, isApproved: true }).populate('user');
   const activeUserIds = trackingVolunteers.map(v => v.user?._id).filter(Boolean);
   const allVolunteers = await User.find({ _id: { $in: activeUserIds }, isActive: true });
 
   const donorCoords = donation.pickupLocation.coordinates;
-  const ngoCoords = ngo.officeLocation.coordinates || req.user.location.coordinates;
+  const ngoCoords = ngo?.officeLocation?.coordinates || req.user.location?.coordinates || [0,0];
 
   const eligibleVolunteers = getEligibleVolunteers(donorCoords, ngoCoords, allVolunteers, 50);
 
-  // Notify them using notifyVolunteersOfNewPickup
   const recipients = eligibleVolunteers.map(v => ({
     name: v.name,
     email: v.email,
@@ -544,6 +613,20 @@ const trackDonation = asyncHandler(async (req, res) => {
   // Mark as stale if no update in the last 2 minutes
   const isStale = lastUpdated && Date.now() - new Date(lastUpdated).getTime() > 2 * 60 * 1000;
 
+  // Calculate Gemini AI arrival prediction based on distance
+  const { haversineDistanceKm } = require('../utils/smartFeatures');
+  const distKm = liveLocation && donation.pickupLocation?.coordinates
+    ? haversineDistanceKm(liveLocation, donation.pickupLocation.coordinates)
+    : 0;
+
+  const etaPrediction = await predictArrivalTime({
+    originCoords: liveLocation,
+    destinationCoords: donation.pickupLocation?.coordinates,
+    distanceKm: distKm,
+    foodCategory: donation.category,
+    destinationAddress: donation.pickupLocation?.address,
+  });
+
   res.json({
     success: true,
     data: {
@@ -554,6 +637,56 @@ const trackDonation = asyncHandler(async (req, res) => {
       status: donation.status,
       lastUpdated,
       isStale,
+      etaPrediction,
+    },
+  });
+});
+
+// @desc    Predict arrival time (ETA) using Gemini AI
+// @route   POST /api/donations/:id/predict-eta
+// @access  Private
+const predictDonationETA = asyncHandler(async (req, res) => {
+  const donation = await Donation.findById(req.params.id)
+    .populate('donor', 'name address location')
+    .populate('acceptedBy', 'name officeLocation officeAddress')
+    .populate('assignedVolunteer', 'name location');
+
+  if (!donation) {
+    res.status(404);
+    throw new Error('Donation not found');
+  }
+
+  const { vehicleType } = req.body; // e.g. bike, car, van, on_foot
+
+  let originCoords = donation.pickupLocation?.coordinates;
+  let destinationCoords = null;
+  let originAddress = donation.pickupLocation?.address || '';
+  let destinationAddress = '';
+
+  if (donation.acceptedBy) {
+    destinationCoords = donation.acceptedBy.officeLocation?.coordinates || donation.acceptedBy.location?.coordinates;
+    destinationAddress = donation.acceptedBy.officeAddress || donation.acceptedBy.address || '';
+  }
+
+  const { haversineDistanceKm } = require('../utils/smartFeatures');
+  const distanceKm = originCoords && destinationCoords ? haversineDistanceKm(originCoords, destinationCoords) : 5;
+
+  const etaPrediction = await predictArrivalTime({
+    originCoords,
+    destinationCoords,
+    distanceKm,
+    vehicleType: vehicleType || 'bike',
+    foodCategory: donation.category,
+    originAddress,
+    destinationAddress,
+  });
+
+  res.json({
+    success: true,
+    data: {
+      donationId: donation._id,
+      foodName: donation.foodName,
+      prediction: etaPrediction,
     },
   });
 });
@@ -659,6 +792,457 @@ const ngoSelfPickupDecision = asyncHandler(async (req, res) => {
   res.json({ success: true, data: donation });
 });
 
+/**
+ * @desc  Volunteer submits food safety review at pickup location
+ * @route PUT /api/donations/:id/food-review
+ * @access Private (volunteer)
+ */
+const foodSafetyReview = asyncHandler(async (req, res) => {
+  const { isSafe } = req.body;
+
+  if (typeof isSafe !== 'boolean') {
+    res.status(400);
+    throw new Error('isSafe must be a boolean value');
+  }
+
+  // Populate acceptedBy (User) to get name, email, phone
+  // Also populate donor for completeness
+  const donation = await Donation.findById(req.params.id)
+    .populate('acceptedBy', 'name email phone')
+    .populate('donor', 'name email phone');
+
+  if (!donation) {
+    res.status(404);
+    throw new Error('Donation not found');
+  }
+
+  // Only the assigned volunteer can submit a review
+  const volUserId = (donation.assignedVolunteer?._id || donation.assignedVolunteer)?.toString();
+  if (!volUserId || volUserId !== req.user._id.toString()) {
+    res.status(403);
+    throw new Error('Only the assigned volunteer can submit a food safety review');
+  }
+
+  if (donation.status !== 'out_for_pickup') {
+    res.status(400);
+    throw new Error('Food safety review can only be submitted when status is out_for_pickup');
+  }
+
+  const { sendEmail, sendSMS } = require('../utils/notify');
+
+  // ── Fetch NGO profile separately to get officeLocation for ETA ──────────
+  // acceptedBy is the User doc; NGO profile is separate (NGO.user = acceptedBy._id)
+  let ngoOfficeCoords = null;
+  let ngoPhone = donation.acceptedBy?.phone || null;
+
+  try {
+    if (donation.acceptedBy?._id) {
+      const ngoDoc = await NGO.findOne({ user: donation.acceptedBy._id });
+      if (ngoDoc) {
+        const coords = ngoDoc.officeLocation?.coordinates;
+        if (coords && (coords[0] !== 0 || coords[1] !== 0)) {
+          ngoOfficeCoords = coords;
+        }
+        // Prefer User's phone (already in acceptedBy.phone), NGO doc doesn't store phone separately
+      }
+    }
+  } catch (ngoErr) {
+    console.warn('[foodSafetyReview] Could not fetch NGO profile:', ngoErr.message);
+  }
+
+  if (isSafe) {
+    // ── Food is SAFE → mark as picked_up and notify NGO ─────────────────
+    donation.status = 'picked_up';
+    donation.timeline.push({
+      status: 'picked_up',
+      note: 'Volunteer confirmed food is safe at pickup. En route to NGO.',
+      updatedBy: req.user._id,
+      timestamp: new Date(),
+    });
+
+    await donation.save();
+
+    // ── Get ETA using volunteer's live GPS → NGO office ──────────────────
+    let etaText = 'shortly';
+    try {
+      const volunteerCoords = req.user.location?.coordinates; // [lng, lat]
+      const destCoords = ngoOfficeCoords || donation.pickupLocation?.coordinates;
+
+      if (volunteerCoords && destCoords &&
+          (volunteerCoords[0] !== 0 || volunteerCoords[1] !== 0)) {
+        const etaResult = await predictArrivalTime({
+          volunteerCoords,
+          destinationCoords: destCoords,
+          vehicleType: req.user.vehicleType || 'bike',
+        });
+        etaText = etaResult?.formattedEta || etaText;
+      }
+    } catch (etaErr) {
+      console.warn('[foodSafetyReview] ETA fetch failed:', etaErr.message);
+    }
+
+    // ── Notify NGO via email + SMS ────────────────────────────────────────
+    const ngo = donation.acceptedBy;
+    if (ngo) {
+      const subject = '✅ Food Safety Confirmed — Volunteer On the Way!';
+      const textBody = [
+        `Great news! 🎉`,
+        ``,
+        `Volunteer ${req.user.name} has inspected and confirmed that the food donation`,
+        `"${donation.foodName}" is SAFE for consumption.`,
+        ``,
+        `📦 Food: ${donation.foodName}`,
+        `🚴 Volunteer: ${req.user.name}`,
+        `⏱️ Estimated Arrival: ${etaText}`,
+        ``,
+        `Please be ready to receive the delivery at your NGO.`,
+        ``,
+        `— GiveAway Platform`,
+      ].join('\n');
+
+      const htmlBody = `
+        <div style="font-family:sans-serif;max-width:500px;margin:0 auto">
+          <div style="background:#16a34a;padding:20px 24px;border-radius:12px 12px 0 0">
+            <h2 style="color:#fff;margin:0">✅ Food is Safe — Volunteer En Route!</h2>
+          </div>
+          <div style="border:1px solid #d1fae5;border-top:none;padding:24px;border-radius:0 0 12px 12px;background:#f0fdf4">
+            <p style="margin:0 0 12px">Volunteer <strong>${req.user.name}</strong> has inspected and confirmed the food donation is <strong style="color:#16a34a">SAFE</strong>.</p>
+            <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
+              <tr><td style="padding:6px 0;color:#6b7280">📦 Food:</td><td style="padding:6px 0;font-weight:600">${donation.foodName}</td></tr>
+              <tr><td style="padding:6px 0;color:#6b7280">🚴 Volunteer:</td><td style="padding:6px 0;font-weight:600">${req.user.name}</td></tr>
+              <tr><td style="padding:6px 0;color:#6b7280">⏱️ ETA:</td><td style="padding:6px 0;font-weight:600;color:#16a34a">${etaText}</td></tr>
+            </table>
+            <p style="margin:0;color:#374151">Please be ready to receive the delivery at your NGO.</p>
+          </div>
+          <p style="color:#9ca3af;font-size:12px;text-align:center;margin-top:12px">— GiveAway Platform</p>
+        </div>`;
+
+      const smsMessage = `GiveAway ✅ FOOD SAFE! Volunteer ${req.user.name} confirmed "${donation.foodName}" is safe & is on the way to your NGO. ETA: ${etaText}. Please be ready!`;
+
+      console.log(`[foodSafetyReview] Notifying NGO ${ngo.email} (phone: ${ngoPhone || 'not set'}) — food SAFE`);
+
+      await Promise.all([
+        sendEmail({ to: ngo.email, subject, text: textBody, html: htmlBody }).catch((e) => {
+          console.warn('[foodSafetyReview] Email send failed:', e.message);
+        }),
+        ngoPhone
+          ? sendSMS({ to: ngoPhone, message: smsMessage }).catch((e) => {
+              console.warn('[foodSafetyReview] SMS send failed:', e.message);
+            })
+          : Promise.resolve(console.log('[foodSafetyReview] SMS skipped — NGO has no phone on record')),
+      ]);
+    }
+
+    res.json({
+      success: true,
+      message: `✅ Food confirmed safe! NGO has been notified via email${ngoPhone ? ' & SMS' : ''}. ETA: ${etaText}`,
+      eta: etaText,
+      data: donation,
+    });
+
+  } else {
+    // ── Food is SPOILED → cancel and notify NGO ───────────────────────────
+    donation.status = 'expired';
+    donation.timeline.push({
+      status: 'expired',
+      note: 'Volunteer found the food spoiled at pickup location. Delivery cancelled.',
+      updatedBy: req.user._id,
+      timestamp: new Date(),
+    });
+
+    await donation.save();
+
+    // ── Notify NGO via email + SMS ────────────────────────────────────────
+    const ngo = donation.acceptedBy;
+    if (ngo) {
+      const subject = '❌ Food Found Spoiled at Pickup — Delivery Cancelled';
+      const textBody = [
+        `We're sorry to inform you.`,
+        ``,
+        `Volunteer ${req.user.name} found the food donation "${donation.foodName}"`,
+        `to be SPOILED upon arrival at the pickup location.`,
+        ``,
+        `📦 Food: ${donation.foodName}`,
+        `🚴 Volunteer: ${req.user.name}`,
+        `❌ Status: Delivery Cancelled (food safety)`,
+        ``,
+        `The delivery has been automatically cancelled to protect recipient safety.`,
+        `We sincerely apologize for the inconvenience.`,
+        ``,
+        `— GiveAway Platform`,
+      ].join('\n');
+
+      const htmlBody = `
+        <div style="font-family:sans-serif;max-width:500px;margin:0 auto">
+          <div style="background:#dc2626;padding:20px 24px;border-radius:12px 12px 0 0">
+            <h2 style="color:#fff;margin:0">❌ Food Found Spoiled — Delivery Cancelled</h2>
+          </div>
+          <div style="border:1px solid #fecaca;border-top:none;padding:24px;border-radius:0 0 12px 12px;background:#fff5f5">
+            <p style="margin:0 0 12px">Unfortunately, Volunteer <strong>${req.user.name}</strong> reported that the food was <strong style="color:#dc2626">SPOILED</strong> at the pickup location.</p>
+            <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
+              <tr><td style="padding:6px 0;color:#6b7280">📦 Food:</td><td style="padding:6px 0;font-weight:600">${donation.foodName}</td></tr>
+              <tr><td style="padding:6px 0;color:#6b7280">🚴 Volunteer:</td><td style="padding:6px 0;font-weight:600">${req.user.name}</td></tr>
+              <tr><td style="padding:6px 0;color:#6b7280">❌ Action:</td><td style="padding:6px 0;font-weight:600;color:#dc2626">Delivery Cancelled</td></tr>
+            </table>
+            <p style="margin:0;color:#374151">The delivery has been automatically cancelled to protect recipient safety. We sincerely apologize.</p>
+          </div>
+          <p style="color:#9ca3af;font-size:12px;text-align:center;margin-top:12px">— GiveAway Platform</p>
+        </div>`;
+
+      const smsMessage = `GiveAway ❌ FOOD SPOILED. Volunteer ${req.user.name} found "${donation.foodName}" spoiled at pickup. Delivery CANCELLED. Sorry for the inconvenience!`;
+
+      console.log(`[foodSafetyReview] Notifying NGO ${ngo.email} (phone: ${ngoPhone || 'not set'}) — food SPOILED`);
+
+      await Promise.all([
+        sendEmail({ to: ngo.email, subject, text: textBody, html: htmlBody }).catch((e) => {
+          console.warn('[foodSafetyReview] Email send failed:', e.message);
+        }),
+        ngoPhone
+          ? sendSMS({ to: ngoPhone, message: smsMessage }).catch((e) => {
+              console.warn('[foodSafetyReview] SMS send failed:', e.message);
+            })
+          : Promise.resolve(console.log('[foodSafetyReview] SMS skipped — NGO has no phone on record')),
+      ]);
+    }
+
+    res.json({
+      success: true,
+      message: `❌ Food marked as spoiled. NGO has been notified via email${ngoPhone ? ' & SMS' : ''}. Delivery cancelled.`,
+      data: donation,
+    });
+  }
+});
+
+/**
+ * @desc  Volunteer responds (accepts or declines) an NGO pickup invitation
+ * @route PUT /api/donations/:id/volunteer-response
+ * @access Private (volunteer)
+ */
+const volunteerRespondInvitation = asyncHandler(async (req, res) => {
+  const { accept } = req.body;
+  if (typeof accept !== 'boolean') {
+    res.status(400);
+    throw new Error('accept must be a boolean value');
+  }
+
+  const donation = await Donation.findById(req.params.id).populate('acceptedBy', 'name email phone');
+  if (!donation) {
+    res.status(404);
+    throw new Error('Donation not found');
+  }
+
+  const volUserId = (donation.assignedVolunteer?._id || donation.assignedVolunteer)?.toString();
+  if (!volUserId || volUserId !== req.user._id.toString()) {
+    res.status(403);
+    throw new Error('Only the assigned volunteer can respond to this invitation');
+  }
+
+  const { sendEmail, sendSMS } = require('../utils/notify');
+  const Volunteer = require('../models/Volunteer');
+  const ngoUser = donation.acceptedBy;
+
+  if (accept) {
+    // ── Volunteer ACCEPTED invitation ──────────────────────────────────────
+    donation.volunteerInvitationStatus = 'accepted';
+    donation.status = 'out_for_pickup';
+    donation.timeline.push({
+      status: 'out_for_pickup',
+      note: `Volunteer ${req.user.name} accepted the pickup invitation. Heading to pickup location.`,
+      updatedBy: req.user._id,
+      timestamp: new Date(),
+    });
+
+    await donation.save();
+    await Volunteer.findOneAndUpdate({ user: req.user._id }, { availabilityStatus: 'busy' });
+
+    // Notify NGO via Email + SMS
+    if (ngoUser) {
+      const subject = `✅ Volunteer Accepted Pickup: ${donation.foodName}`;
+      const textBody = `Hi ${ngoUser.name},\n\nVolunteer ${req.user.name} has ACCEPTED your pickup request for "${donation.foodName}".\n\nThey are now heading to the pickup location.\n\n— GiveAway Platform`;
+      const htmlBody = `<h2 style="color:#16a34a">✅ Volunteer Accepted Pickup Request</h2><p>Volunteer <strong>${req.user.name}</strong> has ACCEPTED your request to pick up <strong>${donation.foodName}</strong>.</p><p>They are en route to the pickup location.</p>`;
+      const smsMsg = `GiveAway: ✅ Volunteer ${req.user.name} ACCEPTED your pickup request for "${donation.foodName}"! En route to pickup.`;
+
+      Promise.all([
+        sendEmail({ to: ngoUser.email, subject, text: textBody, html: htmlBody }).catch(() => {}),
+        ngoUser.phone ? sendSMS({ to: ngoUser.phone, message: smsMsg }).catch(() => {}) : Promise.resolve(),
+      ]).catch(() => {});
+    }
+
+    res.json({
+      success: true,
+      message: 'Invitation accepted! Please inspect the food upon arrival at the pickup location.',
+      data: donation,
+    });
+  } else {
+    // ── Volunteer DECLINED invitation ──────────────────────────────────────
+    donation.assignedVolunteer = null;
+    donation.volunteerInvitationStatus = 'rejected';
+    donation.status = 'accepted'; // return to NGO accepted pool
+    donation.timeline.push({
+      status: 'accepted',
+      note: `Volunteer ${req.user.name} declined pickup invitation. Donation returned to NGO pool for reassignment.`,
+      updatedBy: req.user._id,
+      timestamp: new Date(),
+    });
+
+    await donation.save();
+
+    // Notify NGO via Email + SMS
+    if (ngoUser) {
+      const subject = `⚠️ Volunteer Declined Pickup: ${donation.foodName}`;
+      const textBody = `Hi ${ngoUser.name},\n\nVolunteer ${req.user.name} DECLINED your pickup request for "${donation.foodName}".\n\nPlease log in to your NGO dashboard to assign another volunteer.\n\n— GiveAway Platform`;
+      const htmlBody = `<h2 style="color:#dc2626">⚠️ Volunteer Declined Pickup Request</h2><p>Volunteer <strong>${req.user.name}</strong> DECLINED your request for <strong>${donation.foodName}</strong>.</p><p>Please assign another volunteer from your NGO dashboard.</p>`;
+      const smsMsg = `GiveAway: ⚠️ Volunteer ${req.user.name} DECLINED pickup request for "${donation.foodName}". Please assign another volunteer.`;
+
+      Promise.all([
+        sendEmail({ to: ngoUser.email, subject, text: textBody, html: htmlBody }).catch(() => {}),
+        ngoUser.phone ? sendSMS({ to: ngoUser.phone, message: smsMsg }).catch(() => {}) : Promise.resolve(),
+      ]).catch(() => {});
+    }
+
+    res.json({
+      success: true,
+      message: 'Invitation declined. The NGO has been notified to assign another volunteer.',
+      data: donation,
+    });
+  }
+});
+
+/**
+ * @desc  Volunteer marks delivery completed upon arriving at NGO location
+ * @route PUT /api/donations/:id/volunteer-complete
+ * @access Private (volunteer)
+ */
+const volunteerCompleteDelivery = asyncHandler(async (req, res) => {
+  const donation = await Donation.findById(req.params.id)
+    .populate('acceptedBy', 'name email phone')
+    .populate('donor', 'name email phone');
+
+  if (!donation) {
+    res.status(404);
+    throw new Error('Donation not found');
+  }
+
+  const volUserId = (donation.assignedVolunteer?._id || donation.assignedVolunteer)?.toString();
+  if (!volUserId || volUserId !== req.user._id.toString()) {
+    res.status(403);
+    throw new Error('Only the assigned volunteer can complete this delivery');
+  }
+
+  if (donation.status !== 'picked_up') {
+    res.status(400);
+    throw new Error('Delivery can only be completed after food is picked up');
+  }
+
+  donation.volunteerDelivered = true;
+  donation.status = 'delivery_pending_ngo_confirmation';
+  donation.timeline.push({
+    status: 'delivery_pending_ngo_confirmation',
+    note: `Volunteer ${req.user.name} arrived at NGO location and marked delivery complete. Awaiting NGO receipt confirmation.`,
+    updatedBy: req.user._id,
+    timestamp: new Date(),
+  });
+
+  await donation.save();
+
+  // Notify NGO via Email & SMS
+  const { sendEmail, sendSMS } = require('../utils/notify');
+  const ngoUser = donation.acceptedBy;
+
+  if (ngoUser) {
+    const subject = `📦 Food Delivered by Volunteer — Action Required: Confirm Receipt`;
+    const textBody = `Hi ${ngoUser.name},\n\nVolunteer ${req.user.name} has delivered the food donation "${donation.foodName}" to your location!\n\nPlease log in to your NGO dashboard and click "Confirm Received" to complete this order.\n\n— GiveAway Platform`;
+    const htmlBody = `
+      <div style="font-family:sans-serif;max-width:500px">
+        <h2 style="color:#16a34a">📦 Food Delivered! Confirm Receipt Required</h2>
+        <p>Volunteer <strong>${req.user.name}</strong> has arrived and marked delivery complete for <strong>${donation.foodName}</strong>.</p>
+        <p>Please log in to your NGO dashboard and click <strong>Confirm Received</strong> to complete the order.</p>
+      </div>`;
+    const smsMsg = `GiveAway 📦 Volunteer ${req.user.name} delivered "${donation.foodName}" to your NGO! Please log in to your NGO dashboard to confirm receipt.`;
+
+    Promise.all([
+      sendEmail({ to: ngoUser.email, subject, text: textBody, html: htmlBody }).catch(() => {}),
+      ngoUser.phone ? sendSMS({ to: ngoUser.phone, message: smsMsg }).catch(() => {}) : Promise.resolve(),
+    ]).catch(() => {});
+  }
+
+  res.json({
+    success: true,
+    message: 'Delivery marked complete! NGO has been notified to confirm food receipt.',
+    data: donation,
+  });
+});
+
+/**
+ * @desc  NGO confirms food receipt and completes all processes for donation
+ * @route PUT /api/donations/:id/ngo-confirm-delivery
+ * @access Private (ngo)
+ */
+const ngoConfirmDelivery = asyncHandler(async (req, res) => {
+  const donation = await Donation.findById(req.params.id)
+    .populate('acceptedBy', 'name email phone')
+    .populate('assignedVolunteer', 'name email phone')
+    .populate('donor', 'name email phone');
+
+  if (!donation) {
+    res.status(404);
+    throw new Error('Donation not found');
+  }
+
+  const ngoUserId = (donation.acceptedBy?._id || donation.acceptedBy)?.toString();
+  if (!ngoUserId || ngoUserId !== req.user._id.toString()) {
+    res.status(403);
+    throw new Error('Only the receiving NGO can confirm delivery');
+  }
+
+  donation.status = 'delivered';
+  donation.deliveredAt = new Date();
+  donation.timeline.push({
+    status: 'delivered',
+    note: `NGO confirmed receipt of food donation. All processes completed successfully! 🎉`,
+    updatedBy: req.user._id,
+    timestamp: new Date(),
+  });
+
+  await donation.save();
+
+  // Increment NGO stats & Volunteer stats
+  const NGO = require('../models/NGO');
+  const Volunteer = require('../models/Volunteer');
+  const meals = donation.estimatedMeals || (donation.quantity?.value ? Math.round(donation.quantity.value * 3) : 10);
+
+  await NGO.findOneAndUpdate({ user: req.user._id }, { $inc: { totalMealsDistributed: meals } });
+
+  if (donation.assignedVolunteer?._id) {
+    await Volunteer.findOneAndUpdate(
+      { user: donation.assignedVolunteer._id },
+      { $inc: { totalPickupsCompleted: 1 }, availabilityStatus: 'available' }
+    );
+  }
+
+  // Send final completion SMS + Email to Volunteer, Donor & NGO
+  const { sendEmail, sendSMS } = require('../utils/notify');
+  const ngoName = req.user.name;
+  const vol = donation.assignedVolunteer;
+  const donor = donation.donor;
+
+  const finalSmsMsg = `GiveAway 🎉 All done! NGO confirmed receipt of "${donation.foodName}". Thank you everyone for making this donation a success!`;
+
+  const notifs = [];
+  if (vol?.phone) notifs.push(sendSMS({ to: vol.phone, message: finalSmsMsg }));
+  if (donor?.phone) notifs.push(sendSMS({ to: donor.phone, message: finalSmsMsg }));
+  if (vol?.email) notifs.push(sendEmail({ to: vol.email, subject: `🎉 Order Completed: ${donation.foodName}`, text: finalSmsMsg }));
+  if (donor?.email) notifs.push(sendEmail({ to: donor.email, subject: `🎉 Your donation reached recipients: ${donation.foodName}`, text: finalSmsMsg }));
+
+  Promise.all(notifs).catch(() => {});
+
+  res.json({
+    success: true,
+    message: '🎉 Delivery confirmed! Order completed successfully.',
+    data: donation,
+  });
+});
+
 module.exports = {
   createDonation,
   getDonations,
@@ -673,5 +1257,11 @@ module.exports = {
   trackDonation,
   trackVolunteerByPhone,
   ngoSelfPickupDecision,
+  predictDonationETA,
+  foodSafetyReview,
+  volunteerRespondInvitation,
+  volunteerCompleteDelivery,
+  ngoConfirmDelivery,
 };
+
 

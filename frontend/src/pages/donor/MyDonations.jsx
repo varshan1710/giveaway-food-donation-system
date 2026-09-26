@@ -4,15 +4,18 @@ import toast from 'react-hot-toast';
 import DashboardLayout from '../../components/DashboardLayout';
 import DonationCard from '../../components/DonationCard';
 import Loader from '../../components/Loader';
+import DeleteConfirmModal from '../../components/DeleteConfirmModal';
 import { getDonations, deleteDonation } from '../../services/donationService';
 
-const STATUS_FILTERS = ['all', 'pending', 'accepted', 'out_for_pickup', 'picked_up', 'delivered', 'rejected'];
+const STATUS_FILTERS = ['all', 'pending', 'accepted', 'out_for_pickup', 'picked_up', 'delivered', 'expired', 'rejected'];
 
 const MyDonations = () => {
   const [donations, setDonations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('all');
   const [search, setSearch] = useState('');
+  const [deleteTargetId, setDeleteTargetId] = useState(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -23,14 +26,18 @@ const MyDonations = () => {
 
   useEffect(load, [statusFilter]);
 
-  const handleDelete = async (id) => {
-    if (!window.confirm('Delete this donation? This cannot be undone.')) return;
+  const confirmDelete = async () => {
+    if (!deleteTargetId) return;
+    setDeleteLoading(true);
     try {
-      await deleteDonation(id);
-      toast.success('Donation deleted');
+      await deleteDonation(deleteTargetId);
+      toast.success('Donation record deleted from your dashboard');
+      setDeleteTargetId(null);
       load();
     } catch (err) {
-      toast.error(err.response?.data?.message || 'Could not delete donation');
+      toast.error(err.response?.data?.message || 'Could not delete donation record');
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -67,9 +74,13 @@ const MyDonations = () => {
               key={d._id}
               donation={d}
               actions={
-                d.status === 'pending' && (
-                  <button onClick={() => handleDelete(d._id)} className="btn-danger !py-1.5 !px-3 text-xs">
-                    Delete
+                !['accepted', 'out_for_pickup'].includes(d.status) && (
+                  <button
+                    onClick={() => setDeleteTargetId(d._id)}
+                    className="btn-danger !py-1.5 !px-3 text-xs flex items-center gap-1"
+                    title="Delete this record from your dashboard"
+                  >
+                    🗑️ Delete Record
                   </button>
                 )
               }
@@ -77,6 +88,16 @@ const MyDonations = () => {
           ))}
         </div>
       )}
+
+      {/* Confirmation Modal */}
+      <DeleteConfirmModal
+        isOpen={Boolean(deleteTargetId)}
+        title="Delete Donation Record?"
+        message="Are you sure you want to delete this donation record? This action cannot be undone and will remove it permanently from your dashboard."
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteTargetId(null)}
+        loading={deleteLoading}
+      />
     </DashboardLayout>
   );
 };

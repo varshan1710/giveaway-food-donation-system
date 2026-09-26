@@ -27,9 +27,21 @@ const app = express();
 // --- Security & utility middleware ---
 app.use(helmet({ crossOriginResourcePolicy: false })); // allow serving images cross-origin
 app.use(compression());
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:3000',
+  process.env.CLIENT_URL,
+].filter(Boolean);
+
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || '*',
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes('*') || allowedOrigins.indexOf(origin) !== -1) {
+        return callback(null, true);
+      }
+      return callback(null, true); // Permissive fallback for seamless dev & prod
+    },
     credentials: true,
   })
 );
@@ -40,12 +52,13 @@ if (process.env.NODE_ENV !== 'production') {
   app.use(morgan('dev'));
 }
 
-// Basic rate limiting to slow down brute-force/spam
+// Basic rate limiting to slow down brute-force/spam (skipped in development mode)
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 300,
+  max: 5000,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: () => process.env.NODE_ENV !== 'production',
   message: { success: false, message: 'Too many requests, please try again later.' },
 });
 app.use('/api', apiLimiter);

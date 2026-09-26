@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import toast from 'react-hot-toast';
 import { FiSearch, FiPhone, FiRadio, FiCheckCircle, FiClock, FiAlertTriangle, FiUser } from 'react-icons/fi';
@@ -216,6 +216,21 @@ const VolunteerPhoneTracker = ({ defaultPhone = '', volunteersList = [] }) => {
                 attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
               />
+              {volunteerPos && trackingData.activePickups?.map((p) => {
+                const pickupPos = parseLatLng(p.pickupLocation?.coordinates);
+                if (!pickupPos) return null;
+                return (
+                  <Polyline
+                    key={`line-${p._id}`}
+                    positions={[volunteerPos, pickupPos]}
+                    color="#059669"
+                    weight={4}
+                    dashArray="8, 8"
+                    opacity={0.8}
+                  />
+                );
+              })}
+
               {volunteerPos && (
                 <Marker position={volunteerPos} icon={volunteerIcon}>
                   <Popup>

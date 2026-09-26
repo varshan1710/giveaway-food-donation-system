@@ -1,16 +1,21 @@
 // pages/Profile.jsx
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import DashboardLayout from '../components/DashboardLayout';
+import DeleteConfirmModal from '../components/DeleteConfirmModal';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
 
 const Profile = () => {
-  const { user, refreshUser } = useAuth();
+  const navigate = useNavigate();
+  const { user, refreshUser, logout } = useAuth();
   const [form, setForm] = useState({ name: user?.name || '', phone: user?.phone || '', address: user?.address || '' });
   const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '' });
   const [savingProfile, setSavingProfile] = useState(false);
   const [savingPassword, setSavingPassword] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
 
   // Phone input handler — always keeps +91 prefix and allows only digits after it
   const handlePhoneChange = (e) => {
@@ -52,6 +57,20 @@ const Profile = () => {
       toast.error(err.response?.data?.message || 'Password change failed');
     } finally {
       setSavingPassword(false);
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    setDeletingAccount(true);
+    try {
+      await api.delete('/auth/delete-account');
+      toast.success('Your account has been permanently deleted.');
+      logout();
+      navigate('/login');
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Could not delete account');
+      setDeletingAccount(false);
+      setShowDeleteModal(false);
     }
   };
 
@@ -129,6 +148,33 @@ const Profile = () => {
           </button>
         </form>
       </div>
+
+      {/* ── Danger Zone: Permanent Account Deletion ── */}
+      <div className="mt-8 card border-2 border-red-200 bg-red-50/50 dark:border-red-900/50 dark:bg-red-950/20">
+        <h2 className="text-base font-bold text-red-700 dark:text-red-400 flex items-center gap-2">
+          ⚠️ Danger Zone
+        </h2>
+        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+          Once you delete your account, all your profile information, role profiles, and history will be permanently removed. This action cannot be undone.
+        </p>
+        <button
+          type="button"
+          onClick={() => setShowDeleteModal(true)}
+          className="mt-4 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-red-700 shadow-md flex items-center gap-2"
+        >
+          🗑️ Delete Account Permanently
+        </button>
+      </div>
+
+      {/* Confirmation Modal */}
+      <DeleteConfirmModal
+        isOpen={showDeleteModal}
+        title="Delete Account Permanently?"
+        message="Are you sure you want to delete your complete account? All your profile details, role permissions, and access will be permanently removed. You will be logged out immediately."
+        onConfirm={handleDeleteAccount}
+        onCancel={() => setShowDeleteModal(false)}
+        loading={deletingAccount}
+      />
     </DashboardLayout>
   );
 };

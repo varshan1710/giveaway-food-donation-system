@@ -69,8 +69,9 @@ const registerUser = asyncHandler(async (req, res) => {
 // @access  Public
 const loginUser = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
+  const cleanEmail = (email || '').trim().toLowerCase();
 
-  const user = await User.findOne({ email }).select('+password');
+  const user = await User.findOne({ email: cleanEmail }).select('+password');
   if (!user || !(await user.comparePassword(password))) {
     res.status(401);
     throw new Error('Invalid email or password');
@@ -143,4 +144,28 @@ const changePassword = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Password updated successfully' });
 });
 
-module.exports = { registerUser, loginUser, getMe, updateMe, changePassword };
+// @desc    Delete user account permanently
+// @route   DELETE /api/auth/delete-account
+// @access  Private
+const deleteAccount = asyncHandler(async (req, res) => {
+  const NGO = require('../models/NGO');
+  const Volunteer = require('../models/Volunteer');
+
+  const user = await User.findById(req.user._id);
+  if (!user) {
+    res.status(404);
+    throw new Error('User account not found');
+  }
+
+  // Delete role-specific profile document
+  if (user.role === 'ngo') {
+    await NGO.findOneAndDelete({ user: user._id });
+  } else if (user.role === 'volunteer') {
+    await Volunteer.findOneAndDelete({ user: user._id });
+  }
+
+  await user.deleteOne();
+  res.json({ success: true, message: 'Account permanently deleted' });
+});
+
+module.exports = { registerUser, loginUser, getMe, updateMe, changePassword, deleteAccount };

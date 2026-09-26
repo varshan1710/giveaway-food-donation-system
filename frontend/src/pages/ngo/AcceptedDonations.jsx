@@ -4,8 +4,9 @@ import DashboardLayout from '../../components/DashboardLayout';
 import DonationCard from '../../components/DonationCard';
 import LiveTrackingMap from '../../components/LiveTrackingMap';
 import VolunteerPhoneTracker from '../../components/VolunteerPhoneTracker';
+import DeleteConfirmModal from '../../components/DeleteConfirmModal';
 import Loader from '../../components/Loader';
-import { getDonations, assignVolunteer } from '../../services/donationService';
+import { getDonations, assignVolunteer, deleteDonation, confirmNgoDelivery } from '../../services/donationService';
 import { getAvailableVolunteers } from '../../services/otherServices';
 
 const AcceptedDonations = () => {
@@ -13,6 +14,9 @@ const AcceptedDonations = () => {
   const [volunteers, setVolunteers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState({}); // donationId -> volunteerId
+  const [activeTrackingId, setActiveTrackingId] = useState(null); // Track map open for current food only
+  const [deleteTargetId, setDeleteTargetId] = useState(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -21,11 +25,7 @@ const AcceptedDonations = () => {
       getAvailableVolunteers(),
     ])
       .then(([donationsRes, volunteersRes]) => {
-        // Filter to accepted, out_for_pickup, or picked_up
-        const active = donationsRes.data.data.filter((d) =>
-          ['accepted', 'out_for_pickup', 'picked_up'].includes(d.status)
-        );
-        setDonations(active);
+        setDonations(donationsRes.data.data);
         setVolunteers(volunteersRes.data.data);
       })
       .finally(() => setLoading(false));
@@ -40,11 +40,36 @@ const AcceptedDonations = () => {
       return;
     }
     try {
-      await assignVolunteer(donationId, volunteerId);
-      toast.success('Volunteer assigned!');
+      const res = await assignVolunteer(donationId, volunteerId);
+      toast.success(res.data.message || 'Invitation sent to volunteer!');
       load();
     } catch (err) {
       toast.error(err.response?.data?.message || 'Could not assign volunteer');
+    }
+  };
+
+  const handleConfirmReceipt = async (donationId) => {
+    try {
+      const res = await confirmNgoDelivery(donationId);
+      toast.success(res.data.message || 'Delivery confirmed! Order completed 🎉');
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Could not confirm delivery');
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTargetId) return;
+    setDeleteLoading(true);
+    try {
+      await deleteDonation(deleteTargetId);
+      toast.success('Donation record deleted from NGO dashboard');
+      setDeleteTargetId(null);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Could not delete donation record');
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -54,8 +79,7 @@ const AcceptedDonations = () => {
 
       {/* Flow context: volunteers can only be assigned after NGO acceptance */}
       <div className="mb-6 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300">
-        🔔 <strong>You were alerted</strong> when these donations were posted nearby. Now that you've accepted them,
-        assign a volunteer below to begin pickup &amp; delivery.
+        🔔 <strong>NGO Dashboard</strong>: Manage accepted donations, track live volunteer positions, and delete past completed/expired records.
       </div>
 
       {/* Live Volunteer Tracking by Phone Number */}
@@ -67,7 +91,7 @@ const AcceptedDonations = () => {
         <Loader />
       ) : donations.length === 0 ? (
         <div className="card text-center text-sm text-gray-500 dark:text-gray-400">
-          No accepted donations awaiting volunteer assignment.
+          No donations found in your NGO records.
         </div>
       ) : (
         <div className="space-y-4">
@@ -76,36 +100,89 @@ const AcceptedDonations = () => {
               <DonationCard
                 donation={d}
                 actions={
-                  d.status === 'accepted' ? (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <select
-                        className="input-field !py-1.5 max-w-[220px] text-xs"
-                        value={selected[d._id] || ''}
-                        onChange={(e) => setSelected({ ...selected, [d._id]: e.target.value })}
-                      >
-                        <option value="">Assign a volunteer...</option>
-                        {volunteers.map((v) => (
-                          <option key={v._id} value={v.user._id}>
-                            {v.user.name} ({v.vehicleType})
-                          </option>
-                        ))}
-                      </select>
-                      <button onClick={() => handleAssign(d._id)} className="btn-primary !py-1.5 !px-3 text-xs">
-                        Assign
-                      </button>
-                    </div>
-                  ) : (
-                    <span className="text-xs text-emerald-600 font-semibold dark:text-emerald-400">
-                      🛵 Volunteer En-Route ({d.assignedVolunteer?.name || 'Assigned'})
-                    </span>
-                  )
+                  <div className="flex flex-wrap items-center gap-2">
+                    {d.status === 'accepted' && (
+                      <>
+                        <select
+                          className="input-field !py-1.5 max-w-[220px] text-xs"
+                          value={selected[d._id] || ''}
+                          onChange={(e) => setSelected({ ...selected, [d._id]: e.target.value })}
+                        >
+                          <option value="">Assign a volunteer...</option>
+                          {volunteers.map((v) => (
+                            <option key={v._id} value={v.user._id}>
+                              {v.user.name} ({v.vehicleType})
+                            </option>
+                          ))}
+                        </select>
+                        <button onClick={() => handleAssign(d._id)} className="btn-primary !py-1.5 !px-3 text-xs">
+                          Assign
+                        </button>
+                      </>
+                    )}
+                    {d.status === 'assigned_pending_volunteer' && (
+                      <span className="text-xs text-amber-600 font-semibold dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-2.5 py-1 rounded-md border border-amber-200 dark:border-amber-800">
+                        ⏳ Invitation Sent ({d.assignedVolunteer?.name || 'Volunteer'}) — Awaiting Accept/Decline
+                      </span>
+                    )}
+
+                    {['out_for_pickup', 'picked_up'].includes(d.status) && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-emerald-600 font-semibold dark:text-emerald-400">
+                          🛵 Volunteer En-Route ({d.assignedVolunteer?.name || 'Assigned'})
+                        </span>
+                        <button
+                          onClick={() => setActiveTrackingId(activeTrackingId === d._id ? null : d._id)}
+                          className="btn-secondary !py-1.5 !px-3 text-xs flex items-center gap-1"
+                        >
+                          {activeTrackingId === d._id ? '🙈 Hide Map' : '🗺️ Track Live Location'}
+                        </button>
+                      </div>
+                    )}
+
+                    <button
+                      onClick={() => setDeleteTargetId(d._id)}
+                      className="btn-danger !py-1.5 !px-3 text-xs flex items-center gap-1 ml-auto"
+                      title="Delete this record from NGO dashboard"
+                    >
+                      🗑️ Delete Record
+                    </button>
+                  </div>
                 }
               />
 
-              {['out_for_pickup', 'picked_up'].includes(d.status) && (
+              {/* Confirm Receipt Card when Volunteer Delivered Food */}
+              {(d.status === 'delivery_pending_ngo_confirmation' || d.volunteerDelivered) && d.status !== 'delivered' && (
+                <div className="card border-l-4 border-l-emerald-500 bg-emerald-50/80 dark:bg-emerald-950/50 p-4 ml-4 shadow-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="font-bold text-emerald-900 dark:text-emerald-200 text-sm flex items-center gap-1.5">
+                        📦 Volunteer Arrived &amp; Delivered Food!
+                      </p>
+                      <p className="text-xs text-gray-600 dark:text-gray-300 mt-1">
+                        Volunteer <strong>{d.assignedVolunteer?.name || 'Volunteer'}</strong> has delivered <strong>{d.foodName}</strong> to your location.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => handleConfirmReceipt(d._id)}
+                      className="btn-primary !py-2.5 !px-4 text-xs font-bold shadow-md bg-emerald-600 hover:bg-emerald-700 text-white animate-pulse shrink-0"
+                    >
+                      🎉 Confirm Food Received (Complete Order)
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {['out_for_pickup', 'picked_up'].includes(d.status) && activeTrackingId === d._id && (
                 <div className="card border-l-4 border-l-primary-500 bg-gray-50/50 dark:bg-gray-800/50 ml-4">
-                  <h3 className="mb-2 text-sm font-semibold text-gray-900 dark:text-gray-100">
-                    🗺️ Live Volunteer Tracking — Pickup &amp; Delivery Progress
+                  <h3 className="mb-2 text-sm font-semibold text-gray-900 dark:text-gray-100 flex items-center justify-between">
+                    <span>🗺️ Live Volunteer Tracking — {d.foodName}</span>
+                    <button
+                      onClick={() => setActiveTrackingId(null)}
+                      className="text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 font-normal"
+                    >
+                      Close Map ✖
+                    </button>
                   </h3>
                   <LiveTrackingMap donationId={d._id} height="280px" />
                 </div>
@@ -114,6 +191,16 @@ const AcceptedDonations = () => {
           ))}
         </div>
       )}
+
+      {/* Interactive Confirmation Modal */}
+      <DeleteConfirmModal
+        isOpen={Boolean(deleteTargetId)}
+        title="Delete Donation Record?"
+        message="Are you sure you want to delete this donation record? This action cannot be undone and will permanently remove it from your NGO dashboard history."
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteTargetId(null)}
+        loading={deleteLoading}
+      />
     </DashboardLayout>
   );
 };

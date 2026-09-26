@@ -4,6 +4,7 @@
 //  - Nearby donation notification polling (every 10s while tracking)
 //  - Browser Notification API for new nearby donations
 //  - In-app notification modal with Accept / Decline buttons (first-accept-wins)
+//  - Food Safety Review card when volunteer is at pickup location
 
 import { useEffect, useState, useRef, useCallback } from 'react';
 import toast from 'react-hot-toast';
@@ -19,11 +20,15 @@ import {
   FiNavigation,
   FiClock,
   FiPackage,
+  FiAlertTriangle,
+  FiThumbsUp,
+  FiThumbsDown,
 } from 'react-icons/fi';
 import DashboardLayout from '../../components/DashboardLayout';
 import StatCard from '../../components/StatCard';
 import DonationCard from '../../components/DonationCard';
 import Loader from '../../components/Loader';
+import DeleteConfirmModal from '../../components/DeleteConfirmModal';
 import VolunteerTrackingBeacon from '../../components/VolunteerTrackingBeacon';
 import {
   getMyPickups,
@@ -33,6 +38,12 @@ import {
   getNearbyDonations,
   volunteerAcceptDonation,
 } from '../../services/otherServices';
+import {
+  submitFoodSafetyReview,
+  deleteDonation,
+  respondVolunteerInvitation,
+  completeVolunteerDelivery,
+} from '../../services/donationService';
 
 const POLL_INTERVAL_MS = 10000; // poll nearby donations every 10 seconds
 
@@ -78,56 +89,42 @@ const NearbyDonationModal = ({ donations, onAccept, onDecline, onDismissAll }) =
         <div className="p-5 space-y-4">
           <div className="flex items-start gap-3">
             <div className="rounded-xl bg-emerald-100 dark:bg-emerald-900/40 p-3">
-              <FiPackage className="text-emerald-600 dark:text-emerald-400" size={24} />
+              <FiPackage className="text-emerald-600 dark:text-emerald-400" size={22} />
             </div>
-            <div>
-              <h2 className="font-bold text-gray-900 dark:text-gray-50 text-lg">{d.foodName}</h2>
+            <div className="flex-1">
+              <p className="font-bold text-gray-900 dark:text-gray-50 text-base">{d.foodName}</p>
               <p className="text-sm text-gray-500 dark:text-gray-400 capitalize">{d.category}</p>
             </div>
+            {d.distanceKm != null && (
+              <span className="shrink-0 rounded-full bg-teal-100 px-3 py-1 text-sm font-bold text-teal-700 dark:bg-teal-900/40 dark:text-teal-300">
+                {d.distanceKm} km
+              </span>
+            )}
           </div>
 
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            <div className="rounded-lg bg-gray-50 dark:bg-gray-800 p-3">
-              <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
-                <FiMapPin size={10} className="inline mr-1" />Location
+          <div className="space-y-1.5 text-sm text-gray-600 dark:text-gray-300">
+            {d.pickupLocation?.address && (
+              <p className="flex items-center gap-2">
+                <FiMapPin size={14} className="shrink-0 text-gray-400" />
+                {d.pickupLocation.address}
               </p>
-              <p className="text-gray-800 dark:text-gray-200 font-medium">{d.pickupLocation?.address || 'N/A'}</p>
-            </div>
-            <div className="rounded-lg bg-emerald-50 dark:bg-emerald-900/20 p-3">
-              <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
-                <FiNavigation size={10} className="inline mr-1" />Distance
-              </p>
-              <p className="text-emerald-700 dark:text-emerald-400 font-bold text-lg">
-                {d.distanceKm != null ? `${d.distanceKm} km` : '—'}
-              </p>
-            </div>
-            <div className="rounded-lg bg-gray-50 dark:bg-gray-800 p-3">
-              <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
-                <FiPackage size={10} className="inline mr-1" />Quantity
-              </p>
-              <p className="text-gray-800 dark:text-gray-200 font-medium">
-                {d.quantity?.value} {d.quantity?.unit}
-              </p>
-            </div>
-            <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 p-3">
-              <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
-                <FiClock size={10} className="inline mr-1" />Expires
-              </p>
-              <p className="text-amber-700 dark:text-amber-400 font-medium text-sm">
-                {new Date(d.expiryDate).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-              </p>
-            </div>
-          </div>
-
-          {d.donor?.name && (
-            <p className="text-xs text-gray-500 dark:text-gray-400">
-              Donated by: <strong className="text-gray-700 dark:text-gray-200">{d.donor.name}</strong>
-              {d.donor.address && ` · ${d.donor.address}`}
+            )}
+            <p className="flex items-center gap-2">
+              <FiClock size={14} className="shrink-0 text-gray-400" />
+              Expires: {new Date(d.expiryDate).toLocaleString()}
             </p>
-          )}
+            {d.quantity && (
+              <p className="flex items-center gap-2">
+                <FiPackage size={14} className="shrink-0 text-gray-400" />
+                {typeof d.quantity === 'object'
+                  ? `${d.quantity.value} ${d.quantity.unit}`
+                  : d.quantity}
+              </p>
+            )}
+          </div>
 
           {donations.length > 1 && (
-            <p className="text-xs text-blue-600 dark:text-blue-400 text-center">
+            <p className="text-xs text-gray-400 dark:text-gray-500">
               +{donations.length - 1} more nearby donation{donations.length > 2 ? 's' : ''}
             </p>
           )}
@@ -153,6 +150,169 @@ const NearbyDonationModal = ({ donations, onAccept, onDecline, onDismissAll }) =
   );
 };
 
+// ── Volunteer Invitation Card ────────────────────────────────────────────────
+const VolunteerInvitationCard = ({ donation, onResponse }) => {
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleResponse = async (accept) => {
+    setSubmitting(true);
+    try {
+      const res = await respondVolunteerInvitation(donation._id, accept);
+      toast.success(res.data.message || (accept ? 'Invitation accepted!' : 'Invitation declined.'));
+      onResponse();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Failed to respond to invitation.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="mb-6 rounded-2xl border-2 border-blue-400 bg-blue-50 dark:border-blue-700 dark:bg-blue-950/40 overflow-hidden shadow-lg">
+      <div className="flex items-center gap-3 bg-gradient-to-r from-blue-600 to-indigo-600 px-5 py-4 text-white">
+        <FiTruck size={22} className="animate-bounce" />
+        <div>
+          <p className="font-bold text-base">New Pickup Invitation from NGO!</p>
+          <p className="text-blue-100 text-xs">Please confirm if you accept this pickup task</p>
+        </div>
+      </div>
+      <div className="p-5 space-y-3">
+        <p className="font-bold text-gray-900 dark:text-gray-100 text-base">🍱 {donation.foodName}</p>
+        {donation.pickupLocation?.address && (
+          <p className="text-xs text-gray-600 dark:text-gray-300 flex items-center gap-1">
+            <FiMapPin size={12} /> Pickup Address: {donation.pickupLocation.address}
+          </p>
+        )}
+        {donation.acceptedBy?.name && (
+          <p className="text-xs text-blue-700 dark:text-blue-300 font-semibold">
+            NGO: {donation.acceptedBy.name}
+          </p>
+        )}
+        <div className="flex gap-3 pt-2">
+          <button
+            onClick={() => handleResponse(false)}
+            disabled={submitting}
+            className="flex-1 rounded-xl border border-red-300 bg-red-50 py-2.5 text-sm font-bold text-red-700 hover:bg-red-100 transition disabled:opacity-50"
+          >
+            ❌ Decline / Reject
+          </button>
+          <button
+            onClick={() => handleResponse(true)}
+            disabled={submitting}
+            className="flex-1 rounded-xl bg-emerald-600 py-2.5 text-sm font-bold text-white hover:bg-emerald-700 transition shadow-md disabled:opacity-50"
+          >
+            ✅ Accept Invitation
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── Food Safety Review Card ──────────────────────────────────────────────────
+const FoodSafetyReviewCard = ({ donation, onReviewSubmitted }) => {
+  const [submitting, setSubmitting] = useState(null); // 'safe' | 'spoiled' | null
+  const [confirmed, setConfirmed] = useState(null);   // pre-confirmation step
+
+  const handleReview = async (isSafe) => {
+    setSubmitting(isSafe ? 'safe' : 'spoiled');
+    try {
+      const res = await submitFoodSafetyReview(donation._id, isSafe);
+      const msg = res.data.message || (isSafe ? 'Food marked as safe!' : 'Food marked as spoiled.');
+      toast.success(msg, { duration: 5000 });
+      onReviewSubmitted();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Failed to submit review. Try again.');
+    } finally {
+      setSubmitting(null);
+      setConfirmed(null);
+    }
+  };
+
+  return (
+    <div className="mb-6 rounded-2xl border-2 border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-900/20 overflow-hidden shadow-lg">
+      {/* Header */}
+      <div className="flex items-center gap-3 bg-gradient-to-r from-amber-500 to-orange-500 px-5 py-4">
+        <FiAlertTriangle className="animate-pulse text-white" size={22} />
+        <div>
+          <p className="font-bold text-white text-base">Food Safety Inspection Required</p>
+          <p className="text-amber-100 text-xs">You have arrived at the pickup location</p>
+        </div>
+      </div>
+
+      {/* Donation info */}
+      <div className="px-5 pt-4 pb-2">
+        <p className="text-sm font-semibold text-gray-800 dark:text-gray-100">
+          🍱 {donation.foodName}
+        </p>
+        {donation.pickupLocation?.address && (
+          <p className="text-xs text-gray-500 dark:text-gray-400 flex items-center gap-1 mt-1">
+            <FiMapPin size={11} /> {donation.pickupLocation.address}
+          </p>
+        )}
+        <p className="mt-3 text-sm text-gray-700 dark:text-gray-300">
+          Please inspect the food carefully before picking it up. Your review will be sent to the NGO.
+        </p>
+      </div>
+
+      {/* Confirmation step */}
+      {confirmed === null ? (
+        <div className="flex gap-3 px-5 py-4">
+          <button
+            onClick={() => setConfirmed('safe')}
+            disabled={!!submitting}
+            className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-600 py-3 text-sm font-bold text-white shadow transition hover:bg-emerald-700 disabled:opacity-60"
+          >
+            <FiThumbsUp size={16} />
+            Food is Safe &amp; OK
+          </button>
+          <button
+            onClick={() => setConfirmed('spoiled')}
+            disabled={!!submitting}
+            className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-red-600 py-3 text-sm font-bold text-white shadow transition hover:bg-red-700 disabled:opacity-60"
+          >
+            <FiThumbsDown size={16} />
+            Food is Spoiled
+          </button>
+        </div>
+      ) : (
+        /* Confirm dialog */
+        <div className="px-5 py-4 space-y-3">
+          <div className={`rounded-xl border p-3 text-sm ${
+            confirmed === 'safe'
+              ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-200'
+              : 'border-red-300 bg-red-50 text-red-800 dark:border-red-700 dark:bg-red-900/30 dark:text-red-200'
+          }`}>
+            {confirmed === 'safe'
+              ? '✅ You are confirming the food is safe. The NGO will be notified and you will start delivery.'
+              : '❌ You are confirming the food is spoiled. The NGO will be notified and the pickup will be cancelled.'}
+          </div>
+          <div className="flex gap-3">
+            <button
+              onClick={() => setConfirmed(null)}
+              disabled={!!submitting}
+              className="flex-1 rounded-xl border border-gray-300 bg-white py-2.5 text-sm font-semibold text-gray-700 transition hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300"
+            >
+              Go Back
+            </button>
+            <button
+              onClick={() => handleReview(confirmed === 'safe')}
+              disabled={!!submitting}
+              className={`flex-1 rounded-xl py-2.5 text-sm font-bold text-white shadow transition disabled:opacity-60 ${
+                confirmed === 'safe'
+                  ? 'bg-emerald-600 hover:bg-emerald-700'
+                  : 'bg-red-600 hover:bg-red-700'
+              }`}
+            >
+              {submitting ? 'Submitting…' : 'Confirm & Send to NGO'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ── Main Component ──────────────────────────────────────────────────────────
 const VolunteerOverview = () => {
   const [pickups, setPickups] = useState([]);
@@ -162,6 +322,10 @@ const VolunteerOverview = () => {
   // Tracking state
   const [isTracking, setIsTracking] = useState(false);
   const [trackingLoading, setTrackingLoading] = useState(false);
+
+  // Deletion state
+  const [deleteTargetId, setDeleteTargetId] = useState(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
 
   // Nearby donation notifications
   const [nearbyDonations, setNearbyDonations] = useState([]);
@@ -173,7 +337,7 @@ const VolunteerOverview = () => {
   // ── Load initial data ──────────────────────────────────────────────────
   const load = useCallback(() => {
     setLoading(true);
-    Promise.all([getMyPickups({ status: 'out_for_pickup' }), getMyVolunteerProfile()])
+    Promise.all([getMyPickups(), getMyVolunteerProfile()])
       .then(([pickupsRes, profileRes]) => {
         setPickups(pickupsRes.data.data);
         const prof = profileRes.data.data;
@@ -183,6 +347,31 @@ const VolunteerOverview = () => {
       })
       .finally(() => setLoading(false));
   }, []);
+
+  const confirmDelete = async () => {
+    if (!deleteTargetId) return;
+    setDeleteLoading(true);
+    try {
+      await deleteDonation(deleteTargetId);
+      toast.success('Record deleted from dashboard');
+      setDeleteTargetId(null);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Could not delete record');
+    } finally {
+      setDeleteLoading(false);
+    }
+  };
+
+  const handleCompleteDelivery = async (donationId) => {
+    try {
+      const res = await completeVolunteerDelivery(donationId);
+      toast.success(res.data.message || 'Delivery marked complete! NGO notified.');
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Could not mark delivery complete');
+    }
+  };
 
   useEffect(() => {
     load();
@@ -282,6 +471,14 @@ const VolunteerOverview = () => {
     setDeclinedIds(new Set(declinedIds));
     setNearbyDonations([]);
   };
+
+  // ── Categorize pickups for workflow ───────────────────────────────────
+  const pendingInvitations = pickups.filter(
+    (d) => d.status === 'assigned_pending_volunteer' || d.volunteerInvitationStatus === 'pending'
+  );
+  const pickupsNeedingReview = pickups.filter(
+    (d) => d.status === 'out_for_pickup' && (d.volunteerInvitationStatus === 'accepted' || !d.volunteerInvitationStatus || d.volunteerInvitationStatus === 'none')
+  );
 
   return (
     <DashboardLayout>
@@ -387,6 +584,36 @@ const VolunteerOverview = () => {
         </div>
       </div>
 
+      {/* ── Pending NGO Pickup Invitations (Accept / Decline) ── */}
+      {pendingInvitations.length > 0 && (
+        <div className="mb-6">
+          <h2 className="mb-3 flex items-center gap-2 text-lg font-semibold text-blue-700 dark:text-blue-400">
+            <FiTruck size={18} />
+            Pickup Invitations (Action Required)
+          </h2>
+          <div className="space-y-4">
+            {pendingInvitations.map((d) => (
+              <VolunteerInvitationCard key={d._id} donation={d} onResponse={load} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Food Safety Review Cards (When Accepted & At Pickup Location) ── */}
+      {pickupsNeedingReview.length > 0 && (
+        <div className="mb-6">
+          <h2 className="mb-3 flex items-center gap-2 text-lg font-semibold text-amber-700 dark:text-amber-400">
+            <FiAlertTriangle size={18} />
+            Food Safety Inspection
+          </h2>
+          <div className="space-y-4">
+            {pickupsNeedingReview.map((d) => (
+              <FoodSafetyReviewCard key={d._id} donation={d} onReviewSubmitted={load} />
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* ── Assigned Pickups ── */}
       <h2 className="mb-3 text-lg font-semibold text-gray-900 dark:text-gray-50">Assigned Pickups</h2>
       {loading ? (
@@ -403,10 +630,51 @@ const VolunteerOverview = () => {
       ) : (
         <div className="space-y-3">
           {pickups.map((d) => (
-            <DonationCard key={d._id} donation={d} />
+            <DonationCard
+              key={d._id}
+              donation={d}
+              actions={
+                <div className="flex flex-wrap items-center gap-2 w-full">
+                  {d.status === 'picked_up' && (
+                    <button
+                      onClick={() => handleCompleteDelivery(d._id)}
+                      className="btn-primary !py-2 !px-4 text-xs font-bold shadow-md bg-emerald-600 hover:bg-emerald-700 text-white animate-pulse flex items-center gap-1"
+                    >
+                      📦 Mark Delivery Completed (Arrived at NGO)
+                    </button>
+                  )}
+
+                  {d.status === 'delivery_pending_ngo_confirmation' && (
+                    <span className="text-xs text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 px-2.5 py-1 rounded-md border border-blue-200 dark:border-blue-800 font-semibold">
+                      ⏳ Delivery Complete — Waiting for NGO to confirm receipt
+                    </span>
+                  )}
+
+                  {['expired', 'cancelled', 'delivered', 'rejected'].includes(d.status) && (
+                    <button
+                      onClick={() => setDeleteTargetId(d._id)}
+                      className="btn-danger !py-1.5 !px-3 text-xs flex items-center gap-1 ml-auto"
+                      title="Delete record"
+                    >
+                      🗑️ Delete Record
+                    </button>
+                  )}
+                </div>
+              }
+            />
           ))}
         </div>
       )}
+
+      {/* Confirmation Modal */}
+      <DeleteConfirmModal
+        isOpen={Boolean(deleteTargetId)}
+        title="Delete Record?"
+        message="Are you sure you want to delete this record? This action cannot be undone."
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteTargetId(null)}
+        loading={deleteLoading}
+      />
     </DashboardLayout>
   );
 };

@@ -58,6 +58,12 @@ const DonationCard = ({ donation, actions }) => {
           <p className="text-xs text-gray-400">Donor: {donation.donor.name}</p>
         )}
 
+        {donation.status === 'expired' && (
+          <span className="badge w-fit bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300 font-bold flex items-center gap-1">
+            ⚠️ Food Safety Window Expired — Pickup Auto-Cancelled
+          </span>
+        )}
+
         {(donation.flags?.isDuplicateSuspected || donation.flags?.isSuspicious) && (
           <span className="badge w-fit bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300">
             ⚠ Flagged for review

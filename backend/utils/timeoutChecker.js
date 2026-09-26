@@ -5,6 +5,39 @@ function startTimeoutChecker() {
   console.log('[timeoutChecker] Timer started. Will scan every 60 seconds.');
   setInterval(async () => {
     try {
+      const now = new Date();
+
+      // ── 1. Food Spoilage Auto-Expiration Scan ─────────────────────────────
+      const expiredDonations = await Donation.find({
+        expiryDate: { $lte: now },
+        status: { $in: ['pending', 'accepted', 'out_for_pickup', 'awaiting_ngo_selfpickup'] },
+      }).populate('donor', 'name email phone').populate('acceptedBy', 'name email phone');
+
+      for (const donation of expiredDonations) {
+        donation.status = 'expired';
+        donation.assignedVolunteer = null;
+        donation.timeline.push({
+          status: 'expired',
+          note: 'Food safety window expired — donation automatically cancelled to prevent food spoilage.',
+          timestamp: now,
+        });
+        await donation.save();
+
+        const alertText = `⚠️ GiveAway Food Safety Alert: Your donation "${donation.foodName}" reached its safe consumption window and was automatically cancelled to ensure food safety.`;
+
+        // Notify donor if email exists
+        if (donation.donor?.email) {
+          sendEmail({
+            to: donation.donor.email,
+            subject: '⚠️ GiveAway: Donation Auto-Cancelled (Expired)',
+            text: alertText,
+          }).catch((err) => console.error('[timeoutChecker] Failed to send expiry email:', err.message));
+        }
+
+        console.log(`[timeoutChecker] Auto-cancelled expired donation ${donation._id} ("${donation.foodName}")`);
+      }
+
+      // ── 2. Volunteer Timeout Scan (10-minute timeout) ──────────────────────
       const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
       const matchedDonations = await Donation.find({
         status: 'out_for_pickup',

@@ -4,11 +4,7 @@
 
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL;
-
-if (!API_URL) {
-  console.error('[api.js] VITE_API_URL is not set. Create frontend/.env and add: VITE_API_URL=https://your-backend.onrender.com');
-}
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
 // Append /api suffix if not already present
 let baseURL = API_URL;

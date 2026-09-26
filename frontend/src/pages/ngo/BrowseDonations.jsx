@@ -1,12 +1,13 @@
 // pages/ngo/BrowseDonations.jsx
 import { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
-import { FiMap, FiList } from 'react-icons/fi';
+import { FiMap, FiList, FiTrash2 } from 'react-icons/fi';
 import DashboardLayout from '../../components/DashboardLayout';
 import DonationCard from '../../components/DonationCard';
 import DonationsMapView from '../../components/DonationsMapView';
+import DeleteConfirmModal from '../../components/DeleteConfirmModal';
 import Loader from '../../components/Loader';
-import { getDonations, acceptDonation, rejectDonation } from '../../services/donationService';
+import { getDonations, acceptDonation, rejectDonation, deleteDonation } from '../../services/donationService';
 
 const CATEGORIES = ['', 'Cooked Meals', 'Bakery', 'Fruits & Vegetables', 'Grains & Staples', 'Dairy', 'Packaged Food', 'Beverages', 'Other'];
 
@@ -15,6 +16,8 @@ const BrowseDonations = () => {
   const [loading, setLoading] = useState(true);
   const [category, setCategory] = useState('');
   const [view, setView] = useState('list'); // list | map
+  const [deleteTargetId, setDeleteTargetId] = useState(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -39,10 +42,25 @@ const BrowseDonations = () => {
     const reason = window.prompt('Optional: reason for rejecting this donation');
     try {
       await rejectDonation(id, reason || '');
-      toast.success('Donation rejected');
+      toast.success('Donation rejected and marked on dashboard');
       load();
     } catch (err) {
       toast.error(err.response?.data?.message || 'Could not reject donation');
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTargetId) return;
+    setDeleteLoading(true);
+    try {
+      await deleteDonation(deleteTargetId);
+      toast.success('Food donation record deleted');
+      setDeleteTargetId(null);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Could not delete food donation record');
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -90,19 +108,36 @@ const BrowseDonations = () => {
               key={d._id}
               donation={d}
               actions={
-                <>
+                <div className="flex flex-wrap items-center gap-2">
                   <button onClick={() => handleAccept(d._id)} className="btn-primary !py-1.5 !px-3 text-xs">
                     Accept
                   </button>
                   <button onClick={() => handleReject(d._id)} className="btn-secondary !py-1.5 !px-3 text-xs">
                     Reject
                   </button>
-                </>
+                  <button
+                    onClick={() => setDeleteTargetId(d._id)}
+                    className="btn-danger !py-1.5 !px-3 text-xs flex items-center gap-1 ml-auto"
+                    title="Delete this food donation record"
+                  >
+                    🗑️ Delete Record
+                  </button>
+                </div>
               }
             />
           ))}
         </div>
       )}
+
+      {/* Confirmation Modal */}
+      <DeleteConfirmModal
+        isOpen={Boolean(deleteTargetId)}
+        title="Delete Food Donation Record?"
+        message="Are you sure you want to delete this food donation record? This action cannot be undone."
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteTargetId(null)}
+        loading={deleteLoading}
+      />
     </DashboardLayout>
   );
 };

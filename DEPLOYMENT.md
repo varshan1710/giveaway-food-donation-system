@@ -59,6 +59,7 @@ git push -u origin main
    | `CLIENT_URL` | your Vercel frontend URL, e.g. `https://giveaway.vercel.app` (set after step 4) |
    | `ADMIN_EMAIL` | email for the seeded admin account |
    | `ADMIN_PASSWORD` | password for the seeded admin account |
+   | `GEMINI_API_KEY` | your Google Gemini API key for AI arrival time prediction |
 
 5. Click **Create Web Service**. Render will build and deploy; note the resulting URL, e.g. `https://giveaway-api.onrender.com`.
 6. (Optional) Run the seed script once via Render's **Shell** tab:
@@ -122,6 +123,7 @@ JWT_EXPIRES_IN=7d
 CLIENT_URL=https://giveaway.vercel.app
 ADMIN_EMAIL=admin@giveaway.org
 ADMIN_PASSWORD=ChangeMe123!
+GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
 **Frontend (Vercel) — `.env` equivalent:**

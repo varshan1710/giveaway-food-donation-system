@@ -1,16 +1,20 @@
+// pages/volunteer/MyPickups.jsx
 import { useEffect, useState, useRef } from 'react';
 import toast from 'react-hot-toast';
 import { FiRadio } from 'react-icons/fi';
 import DashboardLayout from '../../components/DashboardLayout';
 import DonationCard from '../../components/DonationCard';
 import Loader from '../../components/Loader';
+import DeleteConfirmModal from '../../components/DeleteConfirmModal';
 import { getMyPickups, updateVolunteerLocation } from '../../services/otherServices';
-import { updateDeliveryStatus } from '../../services/donationService';
+import { updateDeliveryStatus, deleteDonation, completeVolunteerDelivery } from '../../services/donationService';
 
 const MyPickups = () => {
   const [pickups, setPickups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isBeaconing, setIsBeaconing] = useState(false);
+  const [deleteTargetId, setDeleteTargetId] = useState(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
   const watchIdRef = useRef(null);
 
   const load = () => {
@@ -46,13 +50,28 @@ const MyPickups = () => {
     };
   }, [pickups]);
 
-  const handleUpdate = async (id, status) => {
+  const handleCompleteDelivery = async (donationId) => {
     try {
-      await updateDeliveryStatus(id, status, `Marked as ${status.replace('_', ' ')} by volunteer`);
-      toast.success(`Status updated to ${status.replace('_', ' ')}`);
+      const res = await completeVolunteerDelivery(donationId);
+      toast.success(res.data.message || 'Delivery marked complete! NGO notified.');
       load();
     } catch (err) {
-      toast.error(err.response?.data?.message || 'Could not update status');
+      toast.error(err.response?.data?.message || 'Could not mark delivery complete');
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTargetId) return;
+    setDeleteLoading(true);
+    try {
+      await deleteDonation(deleteTargetId);
+      toast.success('Record deleted successfully');
+      setDeleteTargetId(null);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Could not delete record');
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -80,23 +99,47 @@ const MyPickups = () => {
               key={d._id}
               donation={d}
               actions={
-                <>
-                  {d.status === 'out_for_pickup' && (
-                    <button onClick={() => handleUpdate(d._id, 'picked_up')} className="btn-primary !py-1.5 !px-3 text-xs">
-                      Mark Picked Up
-                    </button>
-                  )}
+                <div className="flex flex-wrap items-center gap-2 w-full">
                   {d.status === 'picked_up' && (
-                    <button onClick={() => handleUpdate(d._id, 'delivered')} className="btn-primary !py-1.5 !px-3 text-xs">
-                      Mark Delivered
+                    <button
+                      onClick={() => handleCompleteDelivery(d._id)}
+                      className="btn-primary !py-2 !px-4 text-xs font-bold shadow-md bg-emerald-600 hover:bg-emerald-700 text-white animate-pulse flex items-center gap-1"
+                    >
+                      📦 Mark Delivery Completed (Arrived at NGO)
                     </button>
                   )}
-                </>
+
+                  {d.status === 'delivery_pending_ngo_confirmation' && (
+                    <span className="text-xs text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40 px-2.5 py-1 rounded-md border border-blue-200 dark:border-blue-800 font-semibold">
+                      ⏳ Delivery Complete — Waiting for NGO to confirm receipt
+                    </span>
+                  )}
+
+                  {['expired', 'cancelled', 'delivered', 'rejected'].includes(d.status) && (
+                    <button
+                      onClick={() => setDeleteTargetId(d._id)}
+                      className="btn-danger !py-1.5 !px-3 text-xs flex items-center gap-1 ml-auto"
+                      title="Delete this record"
+                    >
+                      🗑️ Delete Record
+                    </button>
+                  )}
+                </div>
               }
             />
           ))}
         </div>
       )}
+
+      {/* Confirmation Modal */}
+      <DeleteConfirmModal
+        isOpen={Boolean(deleteTargetId)}
+        title="Delete Pickup Record?"
+        message="Are you sure you want to delete this pickup record? This action cannot be undone."
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteTargetId(null)}
+        loading={deleteLoading}
+      />
     </DashboardLayout>
   );
 };
