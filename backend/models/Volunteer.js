@@ -16,6 +16,13 @@ const volunteerSchema = new mongoose.Schema(
     totalPickupsCompleted: { type: Number, default: 0 },
     rating: { type: Number, default: 0, min: 0, max: 5 },
 
+    // ── Fixed Base/Service Location ──────────────────────────────────────
+    serviceLocation: {
+      type: { type: String, enum: ['Point'], default: 'Point' },
+      coordinates: { type: [Number], default: [0, 0] }, // [lng, lat]
+    },
+    serviceAddress: { type: String, default: '' },
+
     // ── Live Tracking Fields ─────────────────────────────────────────────
     // trackingEnabled: volunteer clicked "Start Tracking" in their dashboard
     trackingEnabled: { type: Boolean, default: false },
@@ -30,5 +37,7 @@ const volunteerSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+volunteerSchema.index({ serviceLocation: '2dsphere' });
 
 module.exports = mongoose.model('Volunteer', volunteerSchema);

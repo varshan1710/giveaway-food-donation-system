@@ -48,6 +48,10 @@ const Register = () => {
       toast.error('Please set your NGO office location on the map to receive nearby donation alerts.');
       return;
     }
+    if (form.role === 'volunteer' && !officeCoords) {
+      toast.error('Please set your registered fixed base location on the map for 65km NGO assignments.');
+      return;
+    }
     setLoading(true);
     try {
       // Grab a default coordinate via browser geolocation if available; fallback to [0,0]
@@ -61,7 +65,7 @@ const Register = () => {
       });
 
       const payload = { ...form, coordinates };
-      if (form.role === 'ngo') {
+      if (form.role === 'ngo' || form.role === 'volunteer') {
         payload.officeCoordinates = officeCoords;
         payload.officeAddress = officeAddress || form.address;
       }
@@ -154,16 +158,43 @@ const Register = () => {
           )}
 
           {form.role === 'volunteer' && (
-            <div>
-              <label className="label">Vehicle type</label>
-              <select name="vehicleType" className="input-field" value={form.vehicleType} onChange={handleChange}>
-                <option value="bike">Bike</option>
-                <option value="car">Car</option>
-                <option value="van">Van</option>
-                <option value="on_foot">On foot</option>
-                <option value="other">Other</option>
-              </select>
-            </div>
+            <>
+              <div>
+                <label className="label">Vehicle type</label>
+                <select name="vehicleType" className="input-field" value={form.vehicleType} onChange={handleChange}>
+                  <option value="bike">Bike</option>
+                  <option value="car">Car</option>
+                  <option value="van">Van</option>
+                  <option value="on_foot">On foot</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3 dark:border-emerald-800 dark:bg-emerald-950/30">
+                <div className="mb-1 flex items-center justify-between">
+                  <label className="label !mb-0 font-semibold text-emerald-900 dark:text-emerald-200">
+                    📍 Volunteer Fixed Base Location (Required for 65km NGO matching)
+                  </label>
+                  {officeCoords && (
+                    <span className="badge bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300">
+                      Location set
+                    </span>
+                  )}
+                </div>
+                <p className="mb-2 text-xs text-gray-500 dark:text-gray-400">
+                  You will only be assigned to NGO donation pickups within a 65 km radius of this registered base location.
+                </p>
+                <MapPicker
+                  initialCoords={officeCoords}
+                  onChange={setOfficeCoords}
+                  onAddressResolved={(addr) => {
+                    setOfficeAddress(addr);
+                    if (!form.address) setForm((f) => ({ ...f, address: addr }));
+                  }}
+                  height="220px"
+                />
+              </div>
+            </>
           )}
 
           <div>

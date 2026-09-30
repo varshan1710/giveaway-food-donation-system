@@ -2,18 +2,63 @@
 const asyncHandler = require('express-async-handler');
 const NGO = require('../models/NGO');
 const User = require('../models/User');
+const Donation = require('../models/Donation');
+const { haversineDistanceKm } = require('../utils/smartFeatures');
 
-// @desc    Get all approved volunteers (for NGO to assign pickups)
+// @desc    Get approved volunteers registered within 65 km radius (for NGO assignment)
 // @route   GET /api/ngo/volunteers
 // @access  Private (ngo)
 const getAvailableVolunteers = asyncHandler(async (req, res) => {
   const Volunteer = require('../models/Volunteer');
+
+  // Load NGO profile to get NGO's registered office location
+  const ngoProfile = await NGO.findOne({ user: req.user._id });
+  const ngoCoords = ngoProfile?.officeLocation?.coordinates || req.user.location?.coordinates;
+
+  let centerCoords = ngoCoords;
+  if (req.query.donationId) {
+    const donation = await Donation.findById(req.query.donationId);
+    if (donation?.pickupLocation?.coordinates) {
+      centerCoords = donation.pickupLocation.coordinates;
+    }
+  }
+
   const volunteers = await Volunteer.find().populate(
     'user',
     'name phone location isActive'
   );
-  const active = volunteers.filter((v) => v.user && v.user.isActive);
-  res.json({ success: true, count: active.length, data: active });
+
+  const activeVolunteers = volunteers.filter((v) => v.user && v.user.isActive);
+
+  // Filter volunteers strictly within 65km based on FIXED registered location (serviceLocation or user.location)
+  const eligible = activeVolunteers.filter((v) => {
+    let volCoords = null;
+    if (
+      v.serviceLocation &&
+      Array.isArray(v.serviceLocation.coordinates) &&
+      (v.serviceLocation.coordinates[0] !== 0 || v.serviceLocation.coordinates[1] !== 0)
+    ) {
+      volCoords = v.serviceLocation.coordinates;
+    } else if (v.user && v.user.location && Array.isArray(v.user.location.coordinates)) {
+      volCoords = v.user.location.coordinates;
+    }
+
+    if (!volCoords || (volCoords[0] === 0 && volCoords[1] === 0)) return false;
+
+    if (centerCoords && (centerCoords[0] !== 0 || centerCoords[1] !== 0)) {
+      const dist = haversineDistanceKm(centerCoords, volCoords);
+      v._distanceKm = Number(dist.toFixed(1));
+      return dist <= 65; // Strictly <= 65 km
+    }
+    return true;
+  });
+
+  const data = eligible.map((v) => ({
+    ...v.toObject(),
+    distanceKm: v._distanceKm,
+  }));
+
+  res.json({ success: true, count: data.length, data });
 });
 
 // @desc    Get/update own NGO profile
@@ -43,7 +88,6 @@ const updateMyNgoProfile = asyncHandler(async (req, res) => {
   if (capacityPerDay !== undefined) profile.capacityPerDay = capacityPerDay;
   if (serviceRadiusKm !== undefined) profile.serviceRadiusKm = serviceRadiusKm;
   if (focusAreas) profile.focusAreas = focusAreas;
-  // Update permanent office location if a new pin was placed
   if (officeCoordinates && Array.isArray(officeCoordinates)) {
     profile.officeLocation = { type: 'Point', coordinates: officeCoordinates };
   }

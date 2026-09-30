@@ -78,6 +78,7 @@ app.use('/api/ngo', require('./routes/ngoRoutes'));
 app.use('/api/volunteer', require('./routes/volunteerRoutes'));
 app.use('/api/admin', require('./routes/adminRoutes'));
 app.use('/api/feedback', require('./routes/feedbackRoutes'));
+app.use('/api/esp', require('./routes/espRoutes')); // ESP32 food quality sensor integration
 
 // --- Error handling (must be last) ---
 app.use(notFound);

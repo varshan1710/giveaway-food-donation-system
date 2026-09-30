@@ -35,7 +35,10 @@ const donationSchema = new mongoose.Schema(
       required: [true, 'Expiry date is required'],
       validate: {
         validator: function (v) {
-          return v > new Date();
+          if (this.isNew || this.isModified('expiryDate')) {
+            return v > new Date();
+          }
+          return true;
         },
         message: 'Expiry date must be in the future',
       },
@@ -71,6 +74,9 @@ const donationSchema = new mongoose.Schema(
     volunteerDelivered: { type: Boolean, default: false },
     acceptedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }, // NGO user
     assignedVolunteer: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    assignedAt: { type: Date, default: null },
+    responseDeadline: { type: Date, default: null },
+    respondedAt: { type: Date, default: null },
     isSelfPickup: { type: Boolean, default: false },
     notifiedVolunteers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     volunteerNotifiedAt: { type: Date, default: null },

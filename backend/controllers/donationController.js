@@ -106,16 +106,14 @@ async function alertNearbyNGOs(donation) {
     (n.officeLocation.coordinates[0] !== 0 || n.officeLocation.coordinates[1] !== 0)
   );
 
-  // Call getEligibleNGOs() instead of the current flat-radius filter
-  const eligible = getEligibleNGOs(donationCoords, donation.expiryDate, activeMappedNGOs);
+  // Call getEligibleNGOs() with 65km boundary (donation area <-> NGO area only)
+  const eligible = getEligibleNGOs(donationCoords, donation.expiryDate, activeMappedNGOs, 65);
 
   if (!eligible.length) {
-    donation.status = 'no_ngo_reachable';
-    await donation.save();
     return {
       notifiedCount: 0,
-      noNgoReachable: true,
-      message: "No NGO can reach this in time. Try extending the safe duration."
+      noNgoReachable: false,
+      message: "No registered NGO currently found within 65km of donation area."
     };
   }
 
@@ -366,10 +364,10 @@ const acceptDonation = asyncHandler(async (req, res) => {
 
     if (hasNgoCoords && hasPickupCoords) {
       const distKm = haversineDistanceKm(ngoCoords, pickupCoords);
-      if (distKm > 50) {
+      if (distKm > 65) {
         res.status(403);
         throw new Error(
-          `This donation is ${distKm.toFixed(1)} km away from your NGO office. You can only accept donations within 50 km radius.`
+          `This donation is ${distKm.toFixed(1)} km away from your NGO office. You can only accept donations within 65 km radius.`
         );
       }
     }
@@ -459,11 +457,16 @@ const assignVolunteer = asyncHandler(async (req, res) => {
     donation.assignedVolunteer = targetVolunteerUser._id;
     donation.status = 'assigned_pending_volunteer';
     donation.volunteerInvitationStatus = 'pending';
+    const now = new Date();
+    donation.assignedAt = now;
+    donation.volunteerNotifiedAt = now;
+    donation.responseDeadline = new Date(now.getTime() + 7 * 60 * 1000);
+
     donation.timeline.push({
       status: 'assigned_pending_volunteer',
-      note: `NGO assigned volunteer ${targetVolunteerUser.name}. Awaiting volunteer acceptance.`,
+      note: `NGO assigned volunteer ${targetVolunteerUser.name}. Awaiting volunteer acceptance (7 min timeout).`,
       updatedBy: req.user._id,
-      timestamp: new Date(),
+      timestamp: now,
     });
 
     await donation.save();
@@ -506,7 +509,7 @@ const assignVolunteer = asyncHandler(async (req, res) => {
   const donorCoords = donation.pickupLocation.coordinates;
   const ngoCoords = ngo?.officeLocation?.coordinates || req.user.location?.coordinates || [0,0];
 
-  const eligibleVolunteers = getEligibleVolunteers(donorCoords, ngoCoords, allVolunteers, 50);
+  const eligibleVolunteers = getEligibleVolunteers(donorCoords, ngoCoords, allVolunteers, 65);
 
   const recipients = eligibleVolunteers.map(v => ({
     name: v.name,
@@ -530,7 +533,7 @@ const assignVolunteer = asyncHandler(async (req, res) => {
   donation.status = 'out_for_pickup';
   donation.timeline.push({
     status: 'out_for_pickup',
-    note: `Alerted ${eligibleVolunteers.length} eligible volunteer(s) within 50km for pickup`,
+    note: `Alerted ${eligibleVolunteers.length} eligible volunteer(s) within 65km for pickup`,
     updatedBy: req.user._id
   });
   await donation.save();
@@ -564,15 +567,46 @@ const updateDeliveryStatus = asyncHandler(async (req, res) => {
     throw new Error('You are not assigned to this donation');
   }
 
-  donation.status = status;
   if (status === 'delivered') {
-    donation.deliveredAt = new Date();
-    await require('../models/Volunteer').findOneAndUpdate(
-      { user: req.user._id },
-      { $inc: { totalPickupsCompleted: 1 } }
-    );
-    await NGO.findOneAndUpdate({ user: donation.acceptedBy }, { $inc: { totalMealsDistributed: donation.estimatedMeals } });
+    donation.status = 'delivery_pending_ngo_confirmation';
+    donation.volunteerDelivered = true;
+    donation.timeline.push({
+      status: 'delivery_pending_ngo_confirmation',
+      note: note || `Volunteer ${req.user.name || ''} marked food as delivered. Awaiting NGO confirmation.`,
+      updatedBy: req.user._id,
+      timestamp: new Date(),
+    });
+    await donation.save();
+
+    // Notify receiving NGO via Email & SMS to confirm receipt
+    const { sendEmail, sendSMS } = require('../utils/notify');
+    const ngoUser = await User.findById(donation.acceptedBy);
+
+    if (ngoUser) {
+      const subject = `📦 Food Delivered by Volunteer — Action Required: Confirm Receipt`;
+      const textBody = `Hi ${ngoUser.name},\n\nVolunteer ${req.user.name || 'Volunteer'} has delivered the food donation "${donation.foodName}" to your location!\n\nPlease log in to your NGO dashboard and click "Confirm Food Received" to complete this order.\n\n— GiveAway Platform`;
+      const htmlBody = `
+        <div style="font-family:sans-serif;max-width:500px">
+          <h2 style="color:#16a34a">📦 Food Delivered! Confirm Receipt Required</h2>
+          <p>Volunteer <strong>${req.user.name || 'Volunteer'}</strong> has arrived and marked delivery complete for <strong>${donation.foodName}</strong>.</p>
+          <p>Please log in to your NGO dashboard and click <strong>Confirm Food Received</strong> to complete the order.</p>
+        </div>`;
+      const smsMsg = `GiveAway 📦 Volunteer ${req.user.name || 'Volunteer'} delivered "${donation.foodName}" to your NGO! Please log in to your NGO dashboard to confirm receipt.`;
+
+      Promise.all([
+        ngoUser.email ? sendEmail({ to: ngoUser.email, subject, text: textBody, html: htmlBody }).catch(() => {}) : Promise.resolve(),
+        ngoUser.phone ? sendSMS({ to: ngoUser.phone, message: smsMsg }).catch(() => {}) : Promise.resolve(),
+      ]).catch(() => {});
+    }
+
+    return res.json({
+      success: true,
+      message: 'Delivery marked complete! Awaiting NGO confirmation.',
+      data: donation,
+    });
   }
+
+  donation.status = status;
   donation.timeline.push({ status, note, updatedBy: req.user._id });
   await donation.save();
 
@@ -881,6 +915,26 @@ const foodSafetyReview = asyncHandler(async (req, res) => {
       console.warn('[foodSafetyReview] ETA fetch failed:', etaErr.message);
     }
 
+    // ── Look up ESP32 food quality score (non-fatal; backward compatible) ─
+    // If a FoodTest was completed for this donation, append the score to
+    // the SMS.  If none exists, scoreText stays '' and the SMS is unchanged.
+    let scoreText = '';
+    try {
+      const FoodTest = require('../models/FoodTest');
+      const latestTest = await FoodTest.findOne(
+        { donationId: donation._id, status: 'completed', foodQualityScore: { $ne: null } },
+        null,
+        { sort: { completedAt: -1 } }
+      );
+      if (latestTest && latestTest.foodQualityScore != null) {
+        scoreText = ` Food Quality Score: ${latestTest.foodQualityScore}%.`;
+        console.log(`[foodSafetyReview] Appending food quality score ${latestTest.foodQualityScore}% to SMS (test: ${latestTest.testId})`);
+      }
+    } catch (scoreErr) {
+      // Score lookup failure must NEVER block the food-review notification
+      console.warn('[foodSafetyReview] Score lookup failed (non-fatal):', scoreErr.message);
+    }
+
     // ── Notify NGO via email + SMS ────────────────────────────────────────
     const ngo = donation.acceptedBy;
     if (ngo) {
@@ -894,11 +948,12 @@ const foodSafetyReview = asyncHandler(async (req, res) => {
         `📦 Food: ${donation.foodName}`,
         `🚴 Volunteer: ${req.user.name}`,
         `⏱️ Estimated Arrival: ${etaText}`,
+        scoreText ? `📊 Food Quality Score: ${scoreText.trim()}` : '',
         ``,
         `Please be ready to receive the delivery at your NGO.`,
         ``,
         `— GiveAway Platform`,
-      ].join('\n');
+      ].filter(l => l !== '').join('\n');
 
       const htmlBody = `
         <div style="font-family:sans-serif;max-width:500px;margin:0 auto">
@@ -911,15 +966,18 @@ const foodSafetyReview = asyncHandler(async (req, res) => {
               <tr><td style="padding:6px 0;color:#6b7280">📦 Food:</td><td style="padding:6px 0;font-weight:600">${donation.foodName}</td></tr>
               <tr><td style="padding:6px 0;color:#6b7280">🚴 Volunteer:</td><td style="padding:6px 0;font-weight:600">${req.user.name}</td></tr>
               <tr><td style="padding:6px 0;color:#6b7280">⏱️ ETA:</td><td style="padding:6px 0;font-weight:600;color:#16a34a">${etaText}</td></tr>
+              ${scoreText ? `<tr><td style="padding:6px 0;color:#6b7280">📊 Quality Score:</td><td style="padding:6px 0;font-weight:600;color:#2563eb">${scoreText.trim()}</td></tr>` : ''}
             </table>
             <p style="margin:0;color:#374151">Please be ready to receive the delivery at your NGO.</p>
+            ${scoreText ? `<p style="margin:8px 0 0;font-size:11px;color:#9ca3af">Food Quality Score is a prototype sensor indicator only and is not a certified food-safety assessment.</p>` : ''}
           </div>
           <p style="color:#9ca3af;font-size:12px;text-align:center;margin-top:12px">— GiveAway Platform</p>
         </div>`;
 
-      const smsMessage = `GiveAway ✅ FOOD SAFE! Volunteer ${req.user.name} confirmed "${donation.foodName}" is safe & is on the way to your NGO. ETA: ${etaText}. Please be ready!`;
+      // SMS: appends score if available — otherwise identical to the original SMS
+      const smsMessage = `GiveAway ✅ FOOD SAFE! Volunteer ${req.user.name} confirmed "${donation.foodName}" is safe & is on the way to your NGO. ETA: ${etaText}. Please be ready!${scoreText}`;
 
-      console.log(`[foodSafetyReview] Notifying NGO ${ngo.email} (phone: ${ngoPhone || 'not set'}) — food SAFE`);
+      console.log(`[foodSafetyReview] Notifying NGO ${ngo.email} (phone: ${ngoPhone || 'not set'}) — food SAFE${scoreText ? ' (with quality score)' : ''}`);
 
       await Promise.all([
         sendEmail({ to: ngo.email, subject, text: textBody, html: htmlBody }).catch((e) => {

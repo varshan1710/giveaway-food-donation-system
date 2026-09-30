@@ -101,25 +101,54 @@ const AcceptedDonations = () => {
                 donation={d}
                 actions={
                   <div className="flex flex-wrap items-center gap-2">
-                    {d.status === 'accepted' && (
-                      <>
-                        <select
-                          className="input-field !py-1.5 max-w-[220px] text-xs"
-                          value={selected[d._id] || ''}
-                          onChange={(e) => setSelected({ ...selected, [d._id]: e.target.value })}
-                        >
-                          <option value="">Assign a volunteer...</option>
-                          {volunteers.map((v) => (
-                            <option key={v._id} value={v.user._id}>
-                              {v.user.name} ({v.vehicleType})
+                    {d.status === 'accepted' && (() => {
+                      const calcDistKm = (coordsA, coordsB) => {
+                        if (!coordsA || !coordsB || (coordsA[0] === 0 && coordsA[1] === 0) || (coordsB[0] === 0 && coordsB[1] === 0)) return Infinity;
+                        const [lng1, lat1] = coordsA;
+                        const [lng2, lat2] = coordsB;
+                        const toRad = (deg) => (deg * Math.PI) / 180;
+                        const R = 6371;
+                        const dLat = toRad(lat2 - lat1);
+                        const dLng = toRad(lng2 - lng1);
+                        const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+                        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                      };
+
+                      const eligibleVolunteers = volunteers.map((v) => {
+                        const volCoords = (v.serviceLocation?.coordinates && (v.serviceLocation.coordinates[0] !== 0 || v.serviceLocation.coordinates[1] !== 0))
+                          ? v.serviceLocation.coordinates
+                          : v.user?.location?.coordinates;
+                        const dist = calcDistKm(volCoords, d.pickupLocation?.coordinates);
+                        return { ...v, distKm: dist < Infinity ? dist.toFixed(1) : null };
+                      }).filter((v) => v.distKm !== null && Number(v.distKm) <= 65);
+
+                      return (
+                        <>
+                          <select
+                            className="input-field !py-1.5 max-w-[220px] text-xs"
+                            value={selected[d._id] || ''}
+                            onChange={(e) => setSelected({ ...selected, [d._id]: e.target.value })}
+                            disabled={eligibleVolunteers.length === 0}
+                          >
+                            <option value="">
+                              {eligibleVolunteers.length > 0 ? 'Assign a volunteer...' : 'No volunteers within 65km'}
                             </option>
-                          ))}
-                        </select>
-                        <button onClick={() => handleAssign(d._id)} className="btn-primary !py-1.5 !px-3 text-xs">
-                          Assign
-                        </button>
-                      </>
-                    )}
+                            {eligibleVolunteers.map((v) => (
+                              <option key={v._id} value={v.user._id}>
+                                {v.user.name} ({v.vehicleType}){v.distKm ? ` - ${v.distKm}km` : ''}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            onClick={() => handleAssign(d._id)}
+                            disabled={eligibleVolunteers.length === 0}
+                            className="btn-primary !py-1.5 !px-3 text-xs disabled:opacity-50"
+                          >
+                            Assign
+                          </button>
+                        </>
+                      );
+                    })()}
                     {d.status === 'assigned_pending_volunteer' && (
                       <span className="text-xs text-amber-600 font-semibold dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-2.5 py-1 rounded-md border border-amber-200 dark:border-amber-800">
                         ⏳ Invitation Sent ({d.assignedVolunteer?.name || 'Volunteer'}) — Awaiting Accept/Decline

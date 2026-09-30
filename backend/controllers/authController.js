@@ -45,9 +45,14 @@ const registerUser = asyncHandler(async (req, res) => {
       isApproved: true,
     });
   } else if (safeRole === 'volunteer') {
+    const fixedCoords = officeCoordinates || coordinates;
     await Volunteer.create({
       user: user._id,
       vehicleType: vehicleType || 'bike',
+      serviceLocation: fixedCoords
+        ? { type: 'Point', coordinates: fixedCoords }
+        : { type: 'Point', coordinates: [0, 0] },
+      serviceAddress: officeAddress || address || '',
       isApproved: true,
     });
   }
