@@ -248,6 +248,10 @@ const FoodSafetyReviewCard = ({ donation, onReviewSubmitted }) => {
 
   useEffect(() => {
     fetchTestScore();
+    const interval = setInterval(() => {
+      fetchTestScore();
+    }, 3000);
+    return () => clearInterval(interval);
   }, [fetchTestScore]);
 
   const handleStartTest = async () => {
@@ -278,8 +282,11 @@ const FoodSafetyReviewCard = ({ donation, onReviewSubmitted }) => {
     }
   };
 
-  const isSafeAllowed = espScore !== null && espScore >= 50;
-  const isUnsafeAllowed = espScore !== null && espScore < 50;
+  // Safe / Unsafe allowed logic:
+  // If ESP32 score is present: >= 50% allows SAFE, < 50% allows UNSAFE.
+  // If ESP32 score is not present yet: allow manual inspection fallback.
+  const isSafeAllowed = espScore === null || espScore >= 50;
+  const isUnsafeAllowed = espScore === null || espScore < 50;
 
   const handleReview = async (isSafe) => {
     setSubmitting(isSafe ? 'safe' : 'spoiled');
@@ -415,8 +422,8 @@ const FoodSafetyReviewCard = ({ donation, onReviewSubmitted }) => {
               : 'border-red-300 bg-red-50 text-red-800 dark:border-red-700 dark:bg-red-900/30 dark:text-red-200'
           }`}>
             {confirmed === 'safe'
-              ? `✅ You are confirming the food is SAFE (ESP32 Health Score: ${espScore}%). The NGO will be notified and you will start delivery.`
-              : `❌ You are confirming the food is UNSAFE (ESP32 Health Score: ${espScore}%). The NGO will be notified and the pickup will be cancelled.`}
+              ? `✅ You are confirming the food is SAFE ${espScore != null ? `(ESP32 Health Score: ${espScore}%)` : '(Manual Inspection)'}. The NGO will be notified and you will start delivery.`
+              : `❌ You are confirming the food is UNSAFE ${espScore != null ? `(ESP32 Health Score: ${espScore}%)` : '(Manual Inspection)'}. The NGO will be notified and the pickup will be cancelled.`}
           </div>
           <div className="flex gap-3">
             <button

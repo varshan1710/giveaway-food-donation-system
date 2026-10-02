@@ -234,8 +234,8 @@ const completeTest = asyncHandler(async (req, res) => {
     throw new Error(`Food test "${testId}" not found`);
   }
 
-  if (foodTest.status === 'completed') {
-    // Idempotent — return the existing result
+  if (foodTest.status === 'completed' && foodTest.foodQualityScore !== null) {
+    // Idempotent — return the existing result if already completed with score
     return res.json({
       success: true,
       alreadyCompleted: true,
@@ -251,6 +251,11 @@ const completeTest = asyncHandler(async (req, res) => {
   if (foodTest.status === 'cancelled') {
     res.status(400);
     throw new Error(`Food test "${testId}" has been cancelled and cannot be completed`);
+  }
+
+  if (!foodTest.readings || foodTest.readings.length === 0) {
+    res.status(400);
+    throw new Error('No readings received from ESP32 device yet. Please wait a few seconds for sensor data to arrive.');
   }
 
   // Calculate score
@@ -316,7 +321,14 @@ const getLatestTestForDonation = asyncHandler(async (req, res) => {
   );
 
   if (foodTest) {
-    return res.json({ success: true, data: foodTest });
+    if (foodTest.foodQualityScore === null && foodTest.readings && foodTest.readings.length > 0) {
+      const scoreResult = calculateFoodQualityScore(foodTest.readings);
+      foodTest.foodQualityScore = scoreResult ? scoreResult.foodQualityScore : null;
+      await foodTest.save();
+    }
+    if (foodTest.foodQualityScore !== null) {
+      return res.json({ success: true, data: foodTest });
+    }
   }
 
   // 2. Check for an active test with readings and auto-complete if readings exist
