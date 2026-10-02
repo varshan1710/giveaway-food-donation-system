@@ -250,7 +250,7 @@ const FoodSafetyReviewCard = ({ donation, onReviewSubmitted }) => {
     fetchTestScore();
     const interval = setInterval(() => {
       fetchTestScore();
-    }, 3000);
+    }, 15000);
     return () => clearInterval(interval);
   }, [fetchTestScore]);
 
